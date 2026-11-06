@@ -1,6 +1,6 @@
 # Evidex: notes for Claude Code
 
-- The full build specification is in `docs/BUILD_PROMPT.md`. Read it before planning any work.
+- The project context is in `docs/CONTEXT.md` (the doctor's brief). Read it before planning any work. Spine details: `docs/SPINE.md`.
 - `docs/SCOPE.md` is binding. Never build anything that breaks it. Flag any conflict to the user instead.
 - `docs/ARCHITECTURE.md` describes the agent pipeline.
 - Plan first and wait for approval before writing code.

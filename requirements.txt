@@ -1,0 +1,5 @@
+psycopg==3.2.13
+psycopg-binary==3.2.13
+pytest==9.2.0
+python-dotenv==1.2.4
+streamlit==1.39.0

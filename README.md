@@ -31,20 +31,43 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the agent pipeline.
 
 Evidex does not diagnose, recommend treatment for individual patients, score clinical risk, interpret medical data, or give autonomous clinical advice. See [docs/SCOPE.md](docs/SCOPE.md).
 
-## Status
+## Status (Round 2 MVP, in progress)
 
-Scaffold only. The build specification is in [docs/BUILD_PROMPT.md](docs/BUILD_PROMPT.md).
+- **Done:** Layer 0, the **spine**: a diabetes knowledge graph anchored to the ADA Standards of Care in Diabetes 2026 (Sections 2 and 3). Postgres schema, fixed predicate list, CSV import with row-level validation errors, change log, tests.
+- **Done:** spine read API (`get_assertions`, `outline_for`, `check_value`) and a Streamlit **encyclopedia**: concept search by name or synonym, every statement with its ADA anchor and review status, a graph of Sections 2 and 3, and a doctor edit form (grade, rec/table, page, checked flag, value) logged with the reviewer's name.
+- **Next:** scope guard, planner, claim synthesis, number verifier, review screen, export.
 
-## Planned stack
+The spine stores structured statements (concept, predicate, value, unit, population) and a reference to where each sits in the ADA document. It does not store ADA text. The spine content lives in the database, not in this repository.
 
-Python · FastAPI · LangGraph · PostgreSQL + pgvector · Anthropic API · PubMed / Europe PMC / Crossref APIs · Next.js
+## Stack
+
+Python · PostgreSQL (Supabase) · Ollama (local models) · Streamlit · python-pptx / python-docx
+
+## Spine quick start
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env                       # set DATABASE_URL
+.venv/bin/python scripts/spine.py migrate  # create tables
+.venv/bin/python scripts/spine.py check    # validate data/spine/*.csv, writes nothing
+.venv/bin/python scripts/spine.py import --actor "Dr Vignesh"
+.venv/bin/python scripts/spine.py stats
+.venv/bin/python -m pytest -q
+.venv/bin/streamlit run app.py             # encyclopedia at http://localhost:8501
+```
+
+After editing in the app, the database is the master copy; `scripts/spine.py export` writes it back to CSV.
+
+CSV templates (headers only) are in `data/spine_templates/`. See [docs/SPINE.md](docs/SPINE.md).
 
 ## Repository layout
 
 ```
-backend/   API, agents, verification, ingestion, export
-frontend/  Artifact picker and review screens
-data/      Open-access sources, synthetic cases, templates
-eval/      Evaluation harness and test sets
-docs/      Architecture, scope rules, build prompt
+evidex/spine/   vocabularies and CSV importer for the spine
+migrations/     Postgres schema
+scripts/        command-line tools (spine.py)
+data/           spine CSV templates (content itself is private)
+tests/          pytest suite
+eval/           evaluation harness and test sets (planned)
+docs/           architecture, scope rules, spine guide
 ```

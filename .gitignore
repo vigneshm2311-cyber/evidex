@@ -25,3 +25,9 @@ data/private/
 .DS_Store
 .vscode/
 .idea/
+
+# Spine content lives in the database (Supabase), not in this public repo.
+# Header-only templates are in data/spine_templates/.
+data/spine/
+spine_load.sql
+.venv/
