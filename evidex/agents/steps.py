@@ -238,7 +238,7 @@ SYNTH_SCHEMA = {
 
 
 def synthesizer(llm: LLM, heading: str, audience: str, assertions: list[dict],
-                *, run_id: str, log_conn=None) -> list[dict]:
+                *, run_id: str, log_conn=None, feedback: str | None = None) -> list[dict]:
     valid = {a["id"] for a in assertions}
 
     def check(out):
@@ -255,7 +255,11 @@ def synthesizer(llm: LLM, heading: str, audience: str, assertions: list[dict],
 
     user = (f"Section: {heading}\nAudience: {audience}\n\nAssertions:\n"
             + "\n".join(assertion_line(a) for a in assertions))
-    out = call_logged(llm, SYNTH_SYSTEM, user, SYNTH_SCHEMA, step=f"synthesizer:{heading}",
+    if feedback:
+        user += ("\n\nA checker rejected an earlier claim from these assertions:\n" + feedback
+                 + "\nWrite the claim again so that it states only what the assertions say.")
+    out = call_logged(llm, SYNTH_SYSTEM, user, SYNTH_SCHEMA,
+                      step=f"synthesizer:{heading}" + (":retry" if feedback else ""),
                       run_id=run_id, validate=check, log_conn=log_conn)
     return out["claims"]
 
@@ -263,6 +267,10 @@ def synthesizer(llm: LLM, heading: str, audience: str, assertions: list[dict],
 # ---------------- code checks on claims ----------------
 
 NUM_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)(?![\d])")
+# A number followed by a unit, e.g. "6.5%", "126 mg/dL", "35 years", "23 kg/m2"
+NUM_UNIT_RE = re.compile(
+    r"(?<![\w.])(\d+(?:\.\d+)?)\s*(%|mg/dl|mmol/mol|mmol/l|mmhg|kg/m2|kg/m²|min(?:utes)?/week|"
+    r"years?|yrs?|months?|weeks?|percentile|autoantibod(?:y|ies))", re.I)
 PATIENT_WORDING = re.compile(
     r"\b(your|this|the|a) patient (should|must|needs)\b|\byou should (start|prescribe|give)\b"
     r"|\bwe recommend\b|\bprescribe\b", re.I)
@@ -280,54 +288,77 @@ def numbers_in(text: str) -> set[Decimal]:
 
 
 def _unit(u: str | None) -> str:
-    return re.sub(r"\s+", "", (u or "").lower())
+    """Comparable unit key: lower case, no spaces, first word, no plural."""
+    u = re.sub(r"\s+", " ", (u or "").lower()).strip().replace("²", "2")
+    u = u.split(" ")[0] if u else ""
+    u = {"yrs": "years", "yr": "years", "year": "years", "month": "months", "week": "weeks",
+         "minutes/week": "min/week", "autoantibody": "autoantibodies"}.get(u, u)
+    return u
+
+
+def check_text(text: str, cited: list[dict]) -> dict:
+    """Code checks on a claim's text against the spine rows it cites.
+
+    Numbers are read from the text itself (not from what the model says it used), so the
+    same check applies to model drafts and doctor edits.
+    """
+    issues = []
+    allowed: set[Decimal] = set()
+    values: dict[Decimal, list[dict]] = {}
+    for a in cited:
+        for v in (a["value"], a["value_high"]):
+            if v is not None:
+                values.setdefault(Decimal(v), []).append(a)
+        allowed |= numbers_in(" ".join(filter(None, [api.statement(a), a.get("condition_text") or ""])))
+    allowed |= set(values)
+
+    units_after = {Decimal(n): u for n, u in NUM_UNIT_RE.findall(text or "")}
+    number_checks = []
+    for n in sorted(numbers_in(text)):
+        unit = units_after.get(n)
+        rows = values.get(n, [])
+        if rows:
+            same_unit = [a for a in rows if unit is None or _unit(unit) == _unit(a["unit"])]
+            if same_unit:
+                number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": True,
+                                      "assertion_id": same_unit[0]["id"], "why": ""})
+            else:
+                a = rows[0]
+                number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": False,
+                                      "assertion_id": a["id"],
+                                      "why": f"says {format(n, 'f')} {unit}; spine says "
+                                             f"{api.format_value(a)} ({a['id']})"})
+        elif n in allowed:
+            continue  # part of a name or qualifier, e.g. "75-g OGTT", "at least 8 h"
+        else:
+            # Wrong value: point at the cited row with the same unit, if there is one
+            near = [a for a in cited if a["value"] is not None
+                    and (unit is None or _unit(unit) == _unit(a["unit"]))]
+            a = near[0] if near else None
+            why = (f"says {format(n, 'f')} {unit or ''}".rstrip() + f"; spine says {api.format_value(a)} ({a['id']})"
+                   if a else f"{format(n, 'f')} is not in the cited spine rows")
+            number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": False,
+                                  "assertion_id": a["id"] if a else None, "why": why,
+                                  "range": bool(a and a["operator"] == "range")})
+    stray = [c["value"] for c in number_checks if not c["ok"] and c["value"] and _d(c["value"]) not in allowed]
+    if stray:
+        issues.append("number(s) not in the cited spine rows: " + ", ".join(stray))
+    issues += [c["why"] for c in number_checks if not c["ok"]]
+    if PATIENT_WORDING.search(text or ""):
+        issues.append("patient-directed wording")
+    return {"number_checks": number_checks, "issues": issues}
 
 
 def check_claim(claim: dict, by_id: dict[str, dict]) -> dict:
     """Code verdict for one claim. Grade and anchors come from the spine, never the model."""
     cited = [by_id[i] for i in claim["assertion_ids"] if i in by_id]
-    issues = []
+    res = check_text(claim["text"], cited)
+    issues = list(res["issues"])
     if not cited:
-        issues.append("cites no known assertion")
-
-    allowed: set[Decimal] = set()
-    for a in cited:
-        for v in (a["value"], a["value_high"]):
-            if v is not None:
-                allowed.add(Decimal(v))
-        allowed |= numbers_in(" ".join(filter(None, [
-            api.statement(a), a.get("condition_text") or ""])))
-
-    in_text = numbers_in(claim["text"])
-    number_checks = []
-    for n in claim.get("numbers", []):
-        if _d(n.get("value")) not in in_text:
-            continue  # listed by the model but not actually in the sentence: nothing to check
-        a = by_id.get(n.get("assertion_id"))
-        v = _d(n.get("value"))
-        if a is None or a["id"] not in claim["assertion_ids"]:
-            number_checks.append({**n, "ok": False, "why": "tied to an assertion the claim does not cite"})
-            continue
-        spine_vals = [x for x in (a["value"], a["value_high"]) if x is not None]
-        if not spine_vals:
-            ok = v in allowed
-            why = "" if ok else f"assertion {a['id']} has no such number"
-        else:
-            ok = v in [Decimal(x) for x in spine_vals] and _unit(n.get("unit")) == _unit(a["unit"])
-            why = "" if ok else (f"says {n.get('value')} {n.get('unit')}; spine says "
-                                 f"{api.format_value(a)} ({a['id']})")
-        number_checks.append({**n, "ok": ok, "why": why})
-
-    stray = sorted(numbers_in(claim["text"]) - allowed)
-    if stray:
-        issues.append("number(s) not in the cited spine rows: " + ", ".join(format(x, "f") for x in stray))
-    issues += [c["why"] for c in number_checks if not c["ok"]]
-    if PATIENT_WORDING.search(claim["text"]):
-        issues.append("patient-directed wording")
-
+        issues.insert(0, "cites no known assertion")
     return {
         **claim,
-        "number_checks": number_checks,
+        "number_checks": res["number_checks"],
         "issues": issues,
         "ok": not issues,
         "grades": [a["grade"] or "TODO(doctor)" for a in cited],

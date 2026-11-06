@@ -1,4 +1,4 @@
-"""Evidex: create drafts from the diabetes spine, and browse/edit the spine.
+"""Evidex: create drafts from the diabetes spine, review and sign them off, and browse/edit the spine.
 
 Run:  .venv/bin/streamlit run app.py
 """
@@ -11,7 +11,7 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
-from evidex import pipeline
+from evidex import drafts, pipeline
 from evidex.agents import steps
 from evidex.spine import api
 from evidex.spine.vocab import OPERATORS, STATUSES
@@ -318,6 +318,153 @@ def review(concepts, assertions):
     d2.download_button("assertions.csv", files["assertions.csv"], "assertions.csv", "text/csv")
 
 
+# ---------- review (doctor) ----------
+
+STATUS_BADGE = {"pending": ":orange[● to review]", "approved": ":green[✔ approved]",
+                "rejected": ":gray[✖ rejected]"}
+
+
+def _who() -> str:
+    return (st.session_state.get("reviewer") or "").strip()
+
+
+def _act(fn, *args, ok_msg: str = "", **kw):
+    try:
+        out = fn(*args, **kw)
+    except drafts.ReviewError as e:
+        st.session_state.flash_error = str(e)
+        return None
+    except psycopg.Error as e:
+        st.session_state.flash_error = f"Not saved: {getattr(e.diag, 'message_primary', None) or e}"
+        return None
+    if ok_msg:
+        st.session_state.flash = ok_msg
+    return out
+
+
+def claim_card(c: dict, locked: bool, ctx: str):
+    v = c["verdict"]
+    key = f"{ctx}-{c['id']}"
+    with st.container(border=True):
+        top = STATUS_BADGE[c["status"]] + "  ·  " + (":green[Verifier ✔]" if v.get("ok") else ":red[Verifier ⚠]")
+        if v.get("regenerated"):
+            top += "  ·  rewritten once by the Verifier"
+        if v.get("edited"):
+            top += "  ·  edited by doctor"
+        st.markdown(top)
+
+        if locked or c["status"] == "rejected":
+            st.markdown(("~~" + c["text"] + "~~") if c["status"] == "rejected" else c["text"])
+        else:
+            new_text = st.text_area("Claim", c["text"], key=f"txt-{key}", height=80, label_visibility="collapsed")
+            if new_text.strip() != c["text"]:
+                if st.button("Save edit and re-verify", key=f"save-{key}", type="primary"):
+                    with st.spinner("Re-verifying…"):
+                        _act(drafts.edit, conn(), model(), c["id"], _who(), new_text,
+                             ok_msg="Edit saved and re-verified")
+                    st.rerun()
+        if c["original_text"] != c["text"]:
+            st.caption(f"Original draft: {c['original_text']}")
+
+        nums = v.get("number_checks", [])
+        if nums:
+            st.caption("Numbers: " + "  ".join(
+                f"{'✔' if n['ok'] else '✖'} {n['value']} {n['unit']}".strip() for n in nums))
+        for issue in v.get("issues", []):
+            st.warning(issue)
+        if v.get("support"):
+            st.caption(f"Support judge: {v['support']['verdict'].replace('_', ' ')} — {v['support']['reason']}")
+        st.caption("Grade (from spine): " + ", ".join(sorted(set(v.get("grades", [])))) + " · cites "
+                   + ", ".join(f"`{x}`" for x in c["assertion_ids"]))
+
+        if not locked:
+            for n in nums:
+                if not n["ok"] and n.get("assertion_id") and not n.get("range"):
+                    if st.button(f"Propose {n['value']} {n['unit']} as a spine correction",
+                                 key=f"prop-{key}-{n['value']}"):
+                        new_id = _act(drafts.propose_correction, conn(), c["id"], _who(), n)
+                        if new_id:
+                            load.clear()
+                            st.session_state.flash = (f"Proposed {new_id}. The spine is unchanged until you accept it "
+                                                      "in the Encyclopedia.")
+                        st.rerun()
+
+        if st.toggle("Source", key=f"src-{key}"):
+            for an in v.get("anchors", []):
+                st.markdown(f"> {an['statement']}" + (f" — {an['condition_text']}" if an.get("condition_text") else ""))
+                st.caption(f"📍 {an['anchor']} · `{an['assertion_id']}` · "
+                           + ("✔ checked against 2026 text" if an["doctor_checked"] else "○ not yet checked by doctor"))
+
+        if not locked:
+            b1, b2, b3, b4 = st.columns([1.3, 1, 1, 1])
+            ticked = b1.checkbox("Numbers checked", c["numbers_checked"], key=f"num-{key}",
+                                 disabled=not nums) if nums else False
+            if b2.button("Approve", key=f"ok-{key}", disabled=c["status"] == "approved"):
+                _act(drafts.decide, conn(), c["id"], _who(), "approved", numbers_checked=ticked)
+                st.rerun()
+            if b3.button("Reject", key=f"no-{key}", disabled=c["status"] == "rejected"):
+                _act(drafts.decide, conn(), c["id"], _who(), "rejected")
+                st.rerun()
+            if b4.button("Undo", key=f"undo-{key}", disabled=c["status"] == "pending"):
+                _act(drafts.decide, conn(), c["id"], _who(), "pending")
+                st.rerun()
+
+
+def review_draft(draft_id: str, ctx: str):
+    d = drafts.load(conn(), draft_id)
+    if d is None:
+        st.info("Draft not found.")
+        return
+    locked = d["status"] == "signed_off"
+    st.subheader(d["title"])
+    st.caption(f"{d['artifact']} · {d['audience']} · request: “{d['request']}” · draft `{d['id']}`")
+    state = drafts.signoff_state(d)
+    flagged = sum(not c["verdict"].get("ok") for c in d["claims"])
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Approved", state["approved"])
+    m2.metric("Rejected", state["rejected"])
+    m3.metric("To review", state["pending"])
+    m4.metric("Flagged by Verifier", flagged)
+    if locked:
+        st.success(f"Signed off by **{d['signed_by']}** on {d['signed_at']:%d %b %Y %H:%M}. Locked.")
+    elif not _who():
+        st.info("Enter your name in the sidebar to review; every decision is logged with it.")
+
+    for s in d["sections"]:
+        st.markdown(f"#### {s['heading']}")
+        for c in s["claims"]:
+            claim_card(c, locked, ctx)
+
+    st.divider()
+    st.markdown("### Sign-off")
+    if state["unchecked_rows"]:
+        st.warning(f"{len(state['unchecked_rows'])} spine row(s) behind approved claims are not yet checked "
+                   "against your 2026 copy: " + ", ".join(f"`{x}`" for x in state["unchecked_rows"]))
+    if locked:
+        st.button("Export PPTX / DOCX (checkpoint 5)", disabled=True, key=f"exp-{ctx}")
+        return
+    for r in state["reasons"]:
+        st.caption(f"• {r}")
+    if st.button("Sign off this draft", type="primary", disabled=not state["can_sign"], key=f"sign-{ctx}"):
+        _act(drafts.sign_off, conn(), d["id"], _who(), ok_msg="Signed off. Export is unlocked.")
+        st.rerun()
+
+
+def drafts_page():
+    rows = drafts.list_drafts(conn())
+    if not rows:
+        st.info("No drafts yet. Create one in the Create tab.")
+        return
+    labels = {r["id"]: f"{r['title']} · {r['created_at']:%d %b %H:%M} · "
+                       + ("signed off" if r["status"] == "signed_off" else f"{r['pending']}/{r['claims']} to review")
+              for r in rows}
+    ids = list(labels)
+    default = st.session_state.get("open_draft")
+    pick = st.selectbox("Draft", ids, index=ids.index(default) if default in ids else 0,
+                        format_func=labels.get)
+    review_draft(pick, "drafts")
+
+
 # ---------- create (agents) ----------
 
 EXAMPLES = [
@@ -364,33 +511,12 @@ def render_run(events: list[dict]):
     elif last["status"] == "error":
         st.error(f"{_step_name(last['step'])} failed: {d['error']}")
     elif last["step"] == "done":
-        claims = [c for s in d["sections"] for c in s["claims"]]
-        flagged = sum(not c["ok"] for c in claims)
-        st.subheader(d["title"])
-        st.caption(f"{d['artifact']} · {d['audience']} · {len(claims)} claims · "
-                   + (f":orange[{flagged} flagged by checks]" if flagged else ":green[all numbers check out]"))
-        if d["not_covered"]:
-            st.info("Not in the spine (left out, not guessed): " + "; ".join(d["not_covered"]))
-        for s in d["sections"]:
-            st.markdown(f"#### {s['heading']}")
-            if s["error"]:
-                st.error(s["error"])
-            for i, c in enumerate(s["claims"]):
-                with st.container(border=True):
-                    mark = "✔" if c["ok"] else "⚠"
-                    st.markdown(f"{mark} {c['text']}")
-                    grades = ", ".join(sorted(set(c["grades"])))
-                    st.caption(f"Grade (from spine): {grades} · cites "
-                               + ", ".join(f"`{x}`" for x in c["assertion_ids"]))
-                    for issue in c["issues"]:
-                        st.warning(issue)
-                    if st.toggle("Source", key=f"src-{last['run_id']}-{s['heading']}-{i}"):
-                        for an in c["anchors"]:
-                            a = next((x for x in st.session_state.spine_rows if x["id"] == an["assertion_id"]), None)
-                            if a:
-                                st.markdown(f"> {api.statement(a)}" + (f" — {a['condition_text']}" if a["condition_text"] else ""))
-                            st.caption(f"📍 {an['anchor']} · "
-                                       + ("✔ checked against 2026 text" if an["doctor_checked"] else "○ not yet checked by doctor"))
+        if d.get("draft_id"):
+            st.success("Draft saved. Review each claim below, then sign off. "
+                       "(It is also listed in the Drafts tab.)")
+            review_draft(d["draft_id"], "create")
+        else:
+            st.warning("The run produced no claims to review.")
 
     with st.expander("What each agent saw and returned (audit log)"):
         for e in events:
@@ -461,10 +587,16 @@ with st.sidebar:
 
 if msg := st.session_state.pop("flash", None):
     st.toast(msg, icon="✅")
+if err := st.session_state.pop("flash_error", None):
+    st.toast(err, icon="⛔")
+    st.error(err)
 
-tab0, tab1, tab2, tab3 = st.tabs(["✍️ Create", "📚 Encyclopedia", "🕸️ Graph", "✅ Review progress"])
+tab0, tabd, tab1, tab2, tab3 = st.tabs(["✍️ Create", "📝 Drafts", "📚 Encyclopedia", "🕸️ Graph",
+                                        "✅ Spine review"])
 with tab0:
     create(concepts, assertions)
+with tabd:
+    drafts_page()
 with tab1:
     encyclopedia(concepts, assertions)
 with tab2:

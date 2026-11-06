@@ -25,3 +25,8 @@
 | 2026-11-06 | Dose/treatment/device topics answered "Not found in sources" by a code rule before any planning | Live test: the model answered a dosing question with prevention content; the spine has no such statements |
 | 2026-11-06 | Planner gap list shown only when nothing could be planned | Live test: the model's "not covered" list was unreliable when it did produce an outline |
 | 2026-11-06 | Number check: every number in a claim must exist in its cited rows; declared values must equal spine value and unit | Code, not a model, decides whether a number is right |
+| 2026-11-06 | Support check ("NLI") done by the same local model as a judge, one call per section; it sees only the claim and its cited spine sentences | No new heavy dependency; isolation from the Synthesizer's reasoning |
+| 2026-11-06 | Numbers are read from the claim text by code (not from what the model says it used) | Same check for model drafts and doctor edits; live test showed the LLM judge missing a wrong number |
+| 2026-11-06 | Flagged claims cannot be approved; numbers need a "checked" tick; sign-off needs every claim decided and locks the draft (DB trigger) | No export of anything unreviewed |
+| 2026-11-06 | Unchecked spine rows behind approved claims produce a warning at sign-off, not a block | Doctor's choice; blocking would require checking all 93 rows first |
+| 2026-11-06 | A disputed number becomes a `proposed` spine row; the spine changes only when the doctor accepts it | "No AI agent writes to the spine"; edits flow back as proposals |

@@ -3,7 +3,10 @@
   1 Scope Guard (LLM)  ->  declined? stop
   2 Spine lookup (code) -> nothing? "Not found in sources", stop
   3 Planner (LLM)       -> no covered sections? "Not found in sources", stop
-  4 Synthesizer (LLM) per section, each claim checked by code
+  4 Synthesizer (LLM) per section
+  5 Verifier per section: code checks + support judge (LLM); a failing claim is rewritten
+    once, then left flagged for the doctor
+  6 Draft saved for doctor review (nothing is exported before sign-off)
 
 run() yields one event per step so the UI can show progress.
 """
@@ -13,7 +16,8 @@ import time
 import uuid
 from typing import Iterator
 
-from .agents import steps
+from . import drafts
+from .agents import steps, verifier
 from .llm import LLM, LLMError
 from .spine import api
 
@@ -53,7 +57,7 @@ def _dedupe(sections: list[dict]) -> None:
 
 
 def run(conn, llm: LLM, request: str, artifact: str = "slides",
-        audience: str = steps.AUDIENCES[0], log: bool = True) -> Iterator[dict]:
+        audience: str = steps.AUDIENCES[0], log: bool = True, save: bool = True) -> Iterator[dict]:
     run_id = uuid.uuid4().hex[:12]
     log_conn = conn if log else None
 
@@ -105,9 +109,10 @@ def run(conn, llm: LLM, request: str, artifact: str = "slides",
         try:
             claims = steps.synthesizer(llm, s["heading"], audience, rows,
                                        run_id=run_id, log_conn=log_conn)
-            checked = [steps.check_claim(c, by_id) for c in claims]
+            checked = verifier.verify_section(conn, llm, s["heading"], audience, claims, by_id,
+                                              run_id=run_id, log_conn=log_conn)
             sec = {"heading": s["heading"], "claims": checked, "error": None}
-            status = "ok" if all(c["ok"] for c in checked) else "flagged"
+            status = "ok" if all(c["verdict"]["ok"] for c in checked) else "flagged"
         except LLMError as e:
             sec = {"heading": s["heading"], "claims": [], "error": str(e)}
             status = "error"
@@ -115,9 +120,12 @@ def run(conn, llm: LLM, request: str, artifact: str = "slides",
         _dedupe(sections)
         yield event(f"synthesizer:{s['heading']}", status, sec, t)
 
-    yield {"run_id": run_id, "step": "done", "status": "ok", "ms": 0, "data": {
+    data = {
         "request": request, "artifact": artifact, "audience": audience,
         "title": plan["title"], "sections": [s for s in sections if s["claims"] or s["error"]],
         # The model's own list of gaps is unreliable when it did produce an outline, so it is
         # kept for the audit log but not shown as fact.
-        "model_not_covered": plan["not_covered"], "not_covered": []}}
+        "model_not_covered": plan["not_covered"], "not_covered": []}
+    if save and any(s["claims"] for s in data["sections"]):
+        data["draft_id"] = drafts.save(conn, run_id, data)
+    yield {"run_id": run_id, "step": "done", "status": "ok", "ms": 0, "data": data}

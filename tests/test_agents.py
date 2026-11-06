@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from evidex import pipeline  # noqa: E402
-from evidex.agents import steps  # noqa: E402
+from evidex.agents import steps, verifier  # noqa: E402
 from evidex.llm import LLMError  # noqa: E402
 from evidex.spine import importer  # noqa: E402
 
@@ -36,7 +36,8 @@ class FakeLLM:
     """Returns scripted JSON per agent; records every call."""
     model = "fake"
 
-    def __init__(self, scope=None, plan=None, claims=None):
+    def __init__(self, scope=None, plan=None, claims=None, support=None):
+        self.support = support  # callable(user) -> verdicts, or None for "all supported"
         self.scope = scope or {"label": "in_scope_topic", "reason": "general", "general_query": "q"}
         self.plan = plan
         self.claims = claims or {}
@@ -53,6 +54,11 @@ class FakeLLM:
             heading = user.split("\n", 1)[0].removeprefix("Section: ")
             c = self.claims.get(heading, [])
             return {"claims": c(user) if callable(c) else c}
+        if system is verifier.SUPPORT_SYSTEM:
+            n = user.count("\nSources:")
+            if callable(self.support):
+                return {"verdicts": self.support(user)}
+            return {"verdicts": [{"claim": i, "verdict": "supported", "reason": "ok"} for i in range(1, n + 1)]}
         raise AssertionError("unknown agent")
 
 
@@ -144,9 +150,10 @@ def test_full_run_produces_checked_claims_with_spine_grades(conn):
     assert [e["status"] for e in ev] == ["ok", "ok", "ok", "ok", "ok", "ok"]
     done = ev[-1]["data"]
     crit = done["sections"][0]["claims"]
-    assert all(c["ok"] for c in crit)
-    assert crit[1]["grades"] == ["B"] and crit[0]["grades"] == ["TODO(doctor)"]
-    assert "Rec 2.x" in crit[1]["anchors"][0]["anchor"]
+    assert all(c["verdict"]["ok"] for c in crit)
+    assert crit[1]["verdict"]["grades"] == ["B"] and crit[0]["verdict"]["grades"] == ["TODO(doctor)"]
+    assert "Rec 2.x" in crit[1]["verdict"]["anchors"][0]["anchor"]
+    assert done["draft_id"] == ev[0]["run_id"]
     # planner saw only candidate rows; synthesizer saw only its section's rows
     synth_user = [u for s, u in llm.calls if s is steps.SYNTH_SYSTEM][1]
     assert "a1c-sickle" in synth_user and "dx-fpg" not in synth_user
@@ -160,9 +167,9 @@ def test_wrong_number_is_flagged_not_hidden(conn):
     crit = next(e for e in ev if e["step"] == "synthesizer:Criteria")
     assert crit["status"] == "flagged"
     c = crit["data"]["claims"][0]
-    assert not c["ok"]
-    assert any("spine says ≥ 6.5 %" in i for i in c["issues"])
-    assert any("not in the cited spine rows: 7.0" in i for i in c["issues"])
+    assert not c["verdict"]["ok"]
+    assert any("spine says ≥ 6.5 %" in i for i in c["verdict"]["issues"])
+    assert any("not in the cited spine rows: 7.0" in i for i in c["verdict"]["issues"])
 
 
 def test_undeclared_number_and_wrong_unit_are_flagged(conn):
@@ -205,7 +212,8 @@ def test_every_agent_call_is_logged_with_its_input(conn):
     ev = run(conn, FakeLLM(plan=GOOD_PLAN, claims=GOOD_CLAIMS))
     rows = conn.execute("select step, input, output from agent_call where run_id = %s order by id",
                         (ev[0]["run_id"],)).fetchall()
-    assert [r[0] for r in rows] == ["scope_guard", "planner", "synthesizer:Criteria", "synthesizer:Caveats"]
+    assert [r[0] for r in rows] == ["scope_guard", "planner", "synthesizer:Criteria", "verifier:Criteria",
+                                    "synthesizer:Caveats", "verifier:Caveats"]
     assert "Diagnosing diabetes with HbA1c" in rows[0][1]["user"]
     assert rows[1][2]["title"] == "Diagnosing diabetes"
 
