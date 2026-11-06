@@ -1,0 +1,9 @@
+[client]
+toolbarMode = "viewer"      # hide developer menu and Deploy button on the public link
+
+[server]
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false

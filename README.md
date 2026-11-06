@@ -38,7 +38,8 @@ Evidex does not diagnose, recommend treatment for individual patients, score cli
 - **Done:** agents on a local model (Ollama): Scope Guard, Planner and Synthesizer on a fixed route, with code checks on every output and a full audit log. The app's **Create** tab declines patient-specific requests, answers "Not found in sources" when the spine has nothing, and drafts claims that each cite spine assertions with numbers checked. See [docs/AGENTS.md](docs/AGENTS.md).
 - **Done:** Verifier (code checks on spine rows, numbers and units, plus an LLM support judge; one rewrite, then flag) and the doctor **review screen**: edit (re-verified), approve/reject, click-to-source, propose a spine correction, sign-off that locks the draft. Drafts and decisions are stored and logged.
 - **Done:** **export** after sign-off: PPTX slides or DOCX handout built by code (no model after sign-off) from exactly the approved claim text, with numbered references to spine rows and ADA anchors, "Not provided" for fully rejected sections, and an AI-use note. A fidelity check blocks any mismatch; every export is logged with a SHA-256.
-- **Next:** hosting (tunnel + access code), evaluation.
+- **Done:** **hosting** for evaluators from the doctor's Mac via an ngrok static domain (`scripts/serve.sh` / `stop.sh`): evaluator and doctor codes, one model job at a time, per-visitor limit, auto-restart, keep-awake, in-app "How to test". See [docs/ACCESS.md](docs/ACCESS.md).
+- **Next:** evaluation.
 
 The spine stores structured statements (concept, predicate, value, unit, population) and a reference to where each sits in the ADA document. It does not store ADA text. The spine content lives in the database, not in this repository.
 

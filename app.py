@@ -72,18 +72,53 @@ def block_of(a: dict) -> tuple[str, str]:
 # ---------- access ----------
 
 def gate():
-    code = os.environ.get("ACCESS_CODE")
-    if not code or st.session_state.get("authorised"):
+    """ACCESS_CODE: evaluators (everything except editing the spine).
+    DOCTOR_CODE: the doctor (can also edit the spine). Without codes set: local doctor mode."""
+    code, doctor = os.environ.get("ACCESS_CODE"), os.environ.get("DOCTOR_CODE")
+    if st.session_state.get("authorised"):
+        return
+    if not code and not doctor:
+        st.session_state.update(authorised=True, role="doctor")
         return
     st.title("Evidex")
-    st.caption("Private proof of concept · Health-a-thon 2026 · Team Synexis")
+    st.caption("Doctor productivity and knowledge assistant · Health-a-thon 2026 · Team Synexis (AZYZ69)")
     entered = st.text_input("Access code", type="password")
     if entered:
-        if entered.strip() == code:
-            st.session_state.authorised = True
+        entered = entered.strip()
+        if doctor and entered == doctor:
+            st.session_state.update(authorised=True, role="doctor")
+            st.rerun()
+        if code and entered == code:
+            st.session_state.update(authorised=True, role="evaluator")
             st.rerun()
         st.error("That code is not right.")
     st.stop()
+
+
+def is_doctor() -> bool:
+    return st.session_state.get("role") == "doctor"
+
+
+# ---------- shared limits for a public link ----------
+
+RUNS_PER_HOUR = int(os.environ.get("RUNS_PER_HOUR", "10"))
+
+
+@st.cache_resource
+def model_lock():
+    """One model job at a time across all visitors (the local model can only do one)."""
+    import threading
+    return threading.Lock()
+
+
+def run_allowed() -> str | None:
+    import time as _t
+    now = _t.time()
+    recent = [t for t in st.session_state.get("run_times", []) if now - t < 3600]
+    st.session_state.run_times = recent
+    if len(recent) >= RUNS_PER_HOUR:
+        return f"Limit reached: {RUNS_PER_HOUR} drafts per hour per visitor. Please try again later."
+    return None
 
 
 # ---------- rendering ----------
@@ -173,7 +208,7 @@ def card(a: dict, ctx: str, editable: bool = True):
         st.markdown(badges(a))
         if a["notes"]:
             (st.warning if "LOWER CONFIDENCE" in a["notes"] else st.caption)(a["notes"])
-        if editable:
+        if editable and is_doctor():
             with st.expander("Check / edit"):
                 edit_form(a, ctx)
                 if st.checkbox("Show change history", key=f"hist-{ctx}-{a['id']}"):
@@ -359,9 +394,17 @@ def claim_card(c: dict, locked: bool, ctx: str):
             new_text = st.text_area("Claim", c["text"], key=f"txt-{key}", height=80, label_visibility="collapsed")
             if new_text.strip() != c["text"]:
                 if st.button("Save edit and re-verify", key=f"save-{key}", type="primary"):
-                    with st.spinner("Re-verifying…"):
-                        _act(drafts.edit, conn(), model(), c["id"], _who(), new_text,
-                             ok_msg="Edit saved and re-verified")
+                    lock = model_lock()
+                    if not lock.acquire(timeout=20):
+                        st.session_state.flash_error = ("The model is busy with another draft; "
+                                                        "try saving again in a minute.")
+                    else:
+                        try:
+                            with st.spinner("Re-verifying…"):
+                                _act(drafts.edit, conn(), model(), c["id"], _who(), new_text,
+                                     ok_msg="Edit saved and re-verified")
+                        finally:
+                            lock.release()
                     st.rerun()
         if c["original_text"] != c["text"]:
             st.caption(f"Original draft: {c['original_text']}")
@@ -485,6 +528,7 @@ def drafts_page():
 # ---------- create (agents) ----------
 
 EXAMPLES = [
+    "Diagnostic criteria for prediabetes",
     "Diagnosing diabetes in Indian adults",
     "When is HbA1c unreliable for diagnosing diabetes?",
     "Preventing type 2 diabetes in people with prediabetes",
@@ -569,19 +613,77 @@ def create(concepts, assertions):
                  format_func=lambda x: x or "—")
     topic = (st.session_state.get("topic") or "").strip()
     if st.button("Create draft", type="primary", disabled=not topic):
-        events = []
-        with st.status("Working… (a local model on this Mac; about 1–2 minutes)", expanded=True) as status:
-            for e in pipeline.run(conn(), model(), topic, artifact, audience):
-                events.append(e)
-                if e["step"] != "done":
-                    st.write(f"{_step_name(e['step'])}: **{e['status']}** · {e['ms'] / 1000:.1f}s")
-            label = {"declined": "Declined", "not_found": "Not found in sources",
-                     "error": "Failed"}.get(events[-1]["status"], "Draft ready")
-            status.update(label=label, state="error" if events[-1]["status"] == "error" else "complete",
-                          expanded=False)
-        st.session_state.last_run = events
+        import time as _t
+        limit = run_allowed()
+        lock = model_lock()
+        if limit:
+            st.warning(limit)
+        elif not lock.acquire(blocking=False):
+            st.warning("Another draft is being created right now (the local model runs one job at a "
+                       "time). Please try again in a minute or two.")
+        else:
+            try:
+                st.session_state.run_times.append(_t.time())
+                events = []
+                with st.status("Working… (a local model on this Mac; about 1–3 minutes)",
+                               expanded=True) as status:
+                    for e in pipeline.run(conn(), model(), topic, artifact, audience):
+                        events.append(e)
+                        if e["step"] != "done":
+                            st.write(f"{_step_name(e['step'])}: **{e['status']}** · {e['ms'] / 1000:.1f}s")
+                    label = {"declined": "Declined", "not_found": "Not found in sources",
+                             "error": "Failed"}.get(events[-1]["status"], "Draft ready")
+                    status.update(label=label, state="error" if events[-1]["status"] == "error" else "complete",
+                                  expanded=False)
+                st.session_state.last_run = events
+            finally:
+                lock.release()
     if st.session_state.get("last_run"):
         render_run(st.session_state.last_run)
+
+
+# ---------- about / how to test ----------
+
+def about_page():
+    st.markdown("""
+### Evidex: verified teaching material from a doctor-curated diabetes knowledge base
+
+Doctors spend their time **assembling and checking** evidence, not typing. Evidex drafts teaching
+slides or handouts from a **knowledge spine** anchored to the *ADA Standards of Care in Diabetes 2026*
+(Sections 2–3: diagnosis, classification, screening, prevention). Every claim cites spine rows,
+numbers are checked by code, and **nothing is exported until a doctor approves every claim and signs off**.
+
+**Context → Evidence → Artifact → Verify → Approve**
+
+#### Try it (about 10 minutes)
+1. **Enter your name** in the sidebar. Every review action is logged with it.
+2. **A patient-specific question is declined.** In *Create*, pick the demo example
+   *"What metformin dose should I start for my 54-year-old patient…"* and click **Create draft**
+   (~5 s). Evidex declines and offers a general question instead.
+3. **"Not found in sources".** Click the suggested general question, or pick *"Insulin pump settings…"*.
+   The spine has no dosing, treatment or device statements, so Evidex says so instead of guessing.
+4. **Create a draft.** Pick *"Diagnostic criteria for prediabetes"* (~1 min) or
+   *"Diagnosing diabetes in Indian adults"* (~3 min). Watch each step: Scope Guard, spine lookup,
+   Planner, Synthesizer, Verifier.
+5. **Review.** For each claim, open **Source** to see the spine row and its ADA anchor.
+   **Edit a number** (e.g. change 5.7 to 6.0) and click *Save edit and re-verify*: the Verifier flags it
+   ("spine says 5.7–6.4 %") and approval is blocked. Reject it or change it back.
+6. **Sign off and export.** Approve the remaining claims (tick *Numbers checked*), click **Sign off**,
+   then download the **PPTX** or **DOCX**. The file contains exactly the approved text, numbered
+   references and an AI-use note.
+7. Optional: browse the spine in **Encyclopedia** and **Graph**; open *"What each agent saw and returned"*
+   under a run to see every prompt and output.
+
+#### Good to know
+- Runs on a **local model on the team's Mac** (no patient data, no external AI service). It handles
+  **one draft at a time**; if someone else is running one, you will be asked to wait a minute.
+- Evidex reports what the guideline says; it **does not** give advice about individual patients.
+- Spine values were entered from long-standing ADA criteria; rows marked *"not yet checked"* are still
+  being verified by the doctor against the 2026 text, and missing recommendation numbers or pages show as
+  *TODO(doctor)*. Nothing is filled in by AI.
+- Synthetic content only. Drafts you create are visible in the *Drafts* tab to other evaluators.
+""")
+    st.caption("Team Synexis · AZYZ69 · source code: github.com/vigneshm2311-cyber/evidex")
 
 
 # ---------- main ----------
@@ -593,6 +695,8 @@ with st.sidebar:
     st.markdown("### Evidex")
     st.caption("Diabetes knowledge spine · ADA Standards of Care in Diabetes 2026, Sections 2–3")
     st.text_input("Your name (for the change log)", key="reviewer", placeholder="Dr …")
+    st.caption("Signed in as **doctor** (can edit the spine)" if is_doctor()
+               else "Signed in as **evaluator** (spine is read-only)")
     st.divider()
     st.caption(f"{len(concepts)} concepts · {len(assertions)} statements")
     st.caption("The spine reports what the guideline says and where. It does not give advice "
@@ -608,8 +712,10 @@ if err := st.session_state.pop("flash_error", None):
     st.toast(err, icon="⛔")
     st.error(err)
 
-tab0, tabd, tab1, tab2, tab3 = st.tabs(["✍️ Create", "📝 Drafts", "📚 Encyclopedia", "🕸️ Graph",
-                                        "✅ Spine review"])
+tabi, tab0, tabd, tab1, tab2, tab3 = st.tabs(["ℹ️ How to test", "✍️ Create", "📝 Drafts", "📚 Encyclopedia",
+                                              "🕸️ Graph", "✅ Spine review"])
+with tabi:
+    about_page()
 with tab0:
     create(concepts, assertions)
 with tabd:

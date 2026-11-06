@@ -31,3 +31,4 @@ data/private/
 data/spine/
 spine_load.sql
 .venv/
+logs/

@@ -33,3 +33,7 @@
 | 2026-11-06 | Export built by code from the exact approved text; no AI Composer after sign-off | The signed text is what ships; an AI Composer would need its own review step (roadmap) |
 | 2026-11-06 | Export fidelity checked twice: on the document model and on the text read back from the rendered file | Catches layout code that drops or alters a claim |
 | 2026-11-06 | Exports logged in change_log with SHA-256 and claim IDs | Ties each file to its sign-off |
+| 2026-11-06 | Public access via ngrok free static domain to the app on the doctor's Mac; app bound to 127.0.0.1, Ollama and DB not exposed | Stable link without a paid host; local GPU for the model |
+| 2026-11-06 | Two codes: evaluator (create, review, sign off, export) and doctor (also edit the spine) | Evaluators can try every feature without changing the spine |
+| 2026-11-06 | One model job at a time (shared lock) and 10 drafts per hour per visitor | A local 8B model cannot serve parallel runs; protects the demo from overload |
+| 2026-11-06 | Access code kept out of the public repo; given only in the submission | The repository is public |
