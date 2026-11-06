@@ -35,13 +35,14 @@ Evidex does not diagnose, recommend treatment for individual patients, score cli
 
 - **Done:** Layer 0, the **spine**: a diabetes knowledge graph anchored to the ADA Standards of Care in Diabetes 2026 (Sections 2 and 3). Postgres schema, fixed predicate list, CSV import with row-level validation errors, change log, tests.
 - **Done:** spine read API (`get_assertions`, `outline_for`, `check_value`) and a Streamlit **encyclopedia**: concept search by name or synonym, every statement with its ADA anchor and review status, a graph of Sections 2 and 3, and a doctor edit form (grade, rec/table, page, checked flag, value) logged with the reviewer's name.
-- **Next:** scope guard, planner, claim synthesis, number verifier, review screen, export.
+- **Done:** agents on a local model (Ollama): Scope Guard, Planner and Synthesizer on a fixed route, with code checks on every output and a full audit log. The app's **Create** tab declines patient-specific requests, answers "Not found in sources" when the spine has nothing, and drafts claims that each cite spine assertions with numbers checked. See [docs/AGENTS.md](docs/AGENTS.md).
+- **Next:** doctor review screen with sign-off, export (PPTX/DOCX), hosting, evaluation.
 
 The spine stores structured statements (concept, predicate, value, unit, population) and a reference to where each sits in the ADA document. It does not store ADA text. The spine content lives in the database, not in this repository.
 
 ## Stack
 
-Python · PostgreSQL (Supabase) · Ollama (local models) · Streamlit · python-pptx / python-docx
+Python · PostgreSQL (Supabase) · Ollama (`qwen3:8b`, local) · Streamlit · python-pptx / python-docx
 
 ## Spine quick start
 
@@ -53,7 +54,8 @@ cp .env.example .env                       # set DATABASE_URL
 .venv/bin/python scripts/spine.py import --actor "Dr Vignesh"
 .venv/bin/python scripts/spine.py stats
 .venv/bin/python -m pytest -q
-.venv/bin/streamlit run app.py             # encyclopedia at http://localhost:8501
+.venv/bin/streamlit run app.py             # app at http://localhost:8501 (needs `ollama serve`)
+.venv/bin/python scripts/ask.py "Diagnosing diabetes in Indian adults"   # one run in the terminal
 ```
 
 After editing in the app, the database is the master copy; `scripts/spine.py export` writes it back to CSV.

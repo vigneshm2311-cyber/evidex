@@ -1,4 +1,4 @@
-"""Evidex: spine encyclopedia (checkpoint 2).
+"""Evidex: create drafts from the diabetes spine, and browse/edit the spine.
 
 Run:  .venv/bin/streamlit run app.py
 """
@@ -11,11 +11,13 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
+from evidex import pipeline
+from evidex.agents import steps
 from evidex.spine import api
 from evidex.spine.vocab import OPERATORS, STATUSES
 
 load_dotenv()
-st.set_page_config(page_title="Evidex · Diabetes spine", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Evidex", page_icon="📚", layout="wide")
 
 BLOCKS = {
     ("2", "a"): "A · Diagnostic criteria",
@@ -316,6 +318,129 @@ def review(concepts, assertions):
     d2.download_button("assertions.csv", files["assertions.csv"], "assertions.csv", "text/csv")
 
 
+# ---------- create (agents) ----------
+
+EXAMPLES = [
+    "Diagnosing diabetes in Indian adults",
+    "When is HbA1c unreliable for diagnosing diabetes?",
+    "Preventing type 2 diabetes in people with prediabetes",
+    "What metformin dose should I start for my 54-year-old patient with A1C 7.2?",
+    "Insulin pump settings for type 1 diabetes",
+]
+STEP_NAMES = {"scope_guard": "Scope Guard", "spine_lookup": "Spine lookup", "planner": "Planner",
+              "done": "Done"}
+
+
+@st.cache_resource
+def model():
+    from evidex.llm import OllamaLLM
+    return OllamaLLM()
+
+
+def _step_name(step: str) -> str:
+    if step.startswith("synthesizer:"):
+        return f"Synthesizer · {step.split(':', 1)[1]}"
+    return STEP_NAMES.get(step, step)
+
+
+def _set_topic(t: str):
+    st.session_state.topic = t
+
+
+def render_run(events: list[dict]):
+    last = events[-1]
+    d = last["data"]
+    if last["status"] == "declined":
+        st.error(f"**Declined by the Scope Guard** ({d['decided_by']}). {d['reason']}\n\n"
+                 "Evidex reports what guidelines say in general; it does not advise on individual patients.")
+        if d.get("general_query"):
+            st.button(f"Ask the general question instead: “{d['general_query']}”",
+                      on_click=_set_topic, args=(d["general_query"],))
+    elif last["status"] == "not_found":
+        st.warning(f"**{d['message']}.** The spine (ADA 2026 Sections 2–3) does not cover this topic, "
+                   "so Evidex will not write about it.")
+        if d.get("not_covered"):
+            st.caption("Not covered: " + "; ".join(d["not_covered"]))
+    elif last["status"] == "error":
+        st.error(f"{_step_name(last['step'])} failed: {d['error']}")
+    elif last["step"] == "done":
+        claims = [c for s in d["sections"] for c in s["claims"]]
+        flagged = sum(not c["ok"] for c in claims)
+        st.subheader(d["title"])
+        st.caption(f"{d['artifact']} · {d['audience']} · {len(claims)} claims · "
+                   + (f":orange[{flagged} flagged by checks]" if flagged else ":green[all numbers check out]"))
+        if d["not_covered"]:
+            st.info("Not in the spine (left out, not guessed): " + "; ".join(d["not_covered"]))
+        for s in d["sections"]:
+            st.markdown(f"#### {s['heading']}")
+            if s["error"]:
+                st.error(s["error"])
+            for i, c in enumerate(s["claims"]):
+                with st.container(border=True):
+                    mark = "✔" if c["ok"] else "⚠"
+                    st.markdown(f"{mark} {c['text']}")
+                    grades = ", ".join(sorted(set(c["grades"])))
+                    st.caption(f"Grade (from spine): {grades} · cites "
+                               + ", ".join(f"`{x}`" for x in c["assertion_ids"]))
+                    for issue in c["issues"]:
+                        st.warning(issue)
+                    if st.toggle("Source", key=f"src-{last['run_id']}-{s['heading']}-{i}"):
+                        for an in c["anchors"]:
+                            a = next((x for x in st.session_state.spine_rows if x["id"] == an["assertion_id"]), None)
+                            if a:
+                                st.markdown(f"> {api.statement(a)}" + (f" — {a['condition_text']}" if a["condition_text"] else ""))
+                            st.caption(f"📍 {an['anchor']} · "
+                                       + ("✔ checked against 2026 text" if an["doctor_checked"] else "○ not yet checked by doctor"))
+
+    with st.expander("What each agent saw and returned (audit log)"):
+        for e in events:
+            st.markdown(f"**{_step_name(e['step'])}** · {e['status']} · {e['ms'] / 1000:.1f}s")
+        try:
+            rows = conn().execute("select step, model, input, output, error, attempts, ms "
+                                  "from agent_call where run_id = %s order by id",
+                                  (last["run_id"],)).fetchall()
+        except psycopg.Error as err:
+            rows = []
+            st.caption(f"Could not load the log: {err}")
+        for step, mdl, inp, out, err, attempts, ms in rows:
+            st.markdown(f"---\n**{_step_name(step)}** · `{mdl}` · {attempts} attempt(s) · {ms / 1000:.1f}s")
+            st.text_area("System prompt", inp["system"], height=120, disabled=True,
+                         key=f"sys-{last['run_id']}-{step}")
+            st.text_area("What it was given", inp["user"], height=160, disabled=True,
+                         key=f"usr-{last['run_id']}-{step}")
+            st.json(out if out is not None else {"error": err}, expanded=False)
+        st.caption(f"run `{last['run_id']}`")
+
+
+def create(concepts, assertions):
+    st.session_state.spine_rows = assertions
+    st.markdown("### What are you creating?")
+    c1, c2 = st.columns(2)
+    artifact = c1.radio("Output", list(steps.ARTIFACTS), horizontal=True,
+                        format_func=lambda k: {"slides": "Teaching slides", "handout": "Teaching handout"}[k])
+    audience = c2.selectbox("Audience", steps.AUDIENCES)
+    st.text_area("Topic", key="topic", height=70,
+                 placeholder="e.g. Diagnosing diabetes in Indian adults")
+    st.selectbox("…or pick a demo example", [""] + EXAMPLES, key="example",
+                 on_change=lambda: _set_topic(st.session_state.example),
+                 format_func=lambda x: x or "—")
+    topic = (st.session_state.get("topic") or "").strip()
+    if st.button("Create draft", type="primary", disabled=not topic):
+        events = []
+        with st.status("Working… (a local model on this Mac; about 1–2 minutes)", expanded=True) as status:
+            for e in pipeline.run(conn(), model(), topic, artifact, audience):
+                events.append(e)
+                if e["step"] != "done":
+                    st.write(f"{_step_name(e['step'])}: **{e['status']}** · {e['ms'] / 1000:.1f}s")
+            label = {"declined": "Declined", "not_found": "Not found in sources",
+                     "error": "Failed"}.get(events[-1]["status"], "Draft ready")
+            status.update(label=label, state="error" if events[-1]["status"] == "error" else "complete",
+                          expanded=False)
+        st.session_state.last_run = events
+    if st.session_state.get("last_run"):
+        render_run(st.session_state.last_run)
+
+
 # ---------- main ----------
 
 gate()
@@ -337,7 +462,9 @@ with st.sidebar:
 if msg := st.session_state.pop("flash", None):
     st.toast(msg, icon="✅")
 
-tab1, tab2, tab3 = st.tabs(["📚 Encyclopedia", "🕸️ Graph", "✅ Review progress"])
+tab0, tab1, tab2, tab3 = st.tabs(["✍️ Create", "📚 Encyclopedia", "🕸️ Graph", "✅ Review progress"])
+with tab0:
+    create(concepts, assertions)
 with tab1:
     encyclopedia(concepts, assertions)
 with tab2:

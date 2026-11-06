@@ -291,3 +291,72 @@ def export_csv(conn) -> dict[str, str]:
         w.writerow(["" if rec.get(c) is None else rec.get(c) for c in ASSERTION_COLS])
     out["assertions.csv"] = buf.getvalue()
     return out
+
+
+# ---------- candidate assertions for a free-text topic ----------
+
+# Words in a topic that point at kinds of statement (predicates) rather than concepts.
+TOPIC_PREDICATE_HINTS = [
+    (r"diagnos|criteria|cut-?off|threshold", ["diagnosed_by", "requires_confirmation", "has_threshold",
+                                              "unreliable_when", "use_instead"]),
+    (r"screen|test(ing)? (for|in)|risk factor|who should be tested",
+     ["screen_with", "screening_starts_at", "repeat_interval", "risk_factor_for"]),
+    (r"prevent|delay|lifestyle|weight loss", ["prevented_or_delayed_by", "has_target",
+                                              "requires_monitoring_of"]),
+    (r"classif|types? of diabetes", ["classified_as", "subtype_of"]),
+    (r"unreliable|anaemi|anemi|haemoglobinopath|hemoglobinopath|interfer", ["unreliable_when", "use_instead"]),
+    (r"stag(e|ing)", ["defined_by"]),
+]
+# Words that point at specific concepts not named in them.
+TOPIC_CONCEPT_HINTS = [
+    (r"\bindia|\bindian|south asian|\basian", ["pop:adults_overweight_asian", "rf:high_risk_ethnicity"]),
+    (r"pregnan|gestation|antenatal|prenatal", ["cond:gdm", "pop:pregnant_24_28wk",
+                                               "pop:pregnant_first_visit", "pop:postpartum_gdm"]),
+    (r"child|youth|adolescen|paediatric|pediatric", ["pop:youth_overweight", "pop:infants_lt6mo"]),
+]
+
+
+def candidates_for(conn, topic: str, limit: int = 60) -> dict:
+    """Accepted assertions that may be relevant to a topic, for the Planner to choose from.
+
+    Matches concepts named in the topic (by name or synonym), concept hints (e.g. 'Indian'),
+    and statement-type hints (e.g. 'screening'). If a concept is named, statement-type hints
+    only add rows that touch a named concept or its close neighbours. Returns
+    {"concepts", "predicates", "assertions"}; empty assertions means the spine has nothing.
+    """
+    t = topic.lower()
+    concepts = all_concepts(conn)
+    named = {c["id"] for c in resolve(conn, topic, concepts)}
+    for pat, ids in TOPIC_CONCEPT_HINTS:
+        if re.search(pat, t):
+            named |= set(ids)
+    preds = set()
+    for pat, ps in TOPIC_PREDICATE_HINTS:
+        if re.search(pat, t):
+            preds |= set(ps)
+    rows = all_assertions(conn, status="accepted")
+
+    def touches(a, ids):
+        return a["subject_id"] in ids or a["object_id"] in ids or a["population_id"] in ids
+
+    # A named concept also covers its types and subtypes, so 'screening for diabetes' finds
+    # T2D rows and 'type 1 staging' finds the stage rows. Diagnosis of diabetes covers prediabetes.
+    family = set(named)
+    for _ in range(2):
+        family |= {a["subject_id"] for a in rows
+                   if a["predicate"] in ("classified_as", "subtype_of") and a["object_id"] in family}
+    if "cond:diabetes" in named and "diagnosed_by" in preds:
+        family |= {"cond:prediabetes", "cond:ifg", "cond:igt", "test:a1c"}
+    if named and preds:
+        picked = [a for a in rows if a["predicate"] in preds and touches(a, family)]
+        # definitions of populations used by the picked rows (e.g. BMI cut-offs)
+        pops = {a["population_id"] for a in picked if a["population_id"]}
+        picked += [a for a in rows if a["predicate"] == "defined_by" and a["subject_id"] in pops
+                   and a not in picked]
+    elif named:
+        picked = [a for a in rows if touches(a, named)]
+    elif preds:
+        picked = [a for a in rows if a["predicate"] in preds]
+    else:
+        picked = []
+    return {"concepts": sorted(named), "predicates": sorted(preds), "assertions": picked[:limit]}

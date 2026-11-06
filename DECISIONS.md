@@ -19,3 +19,9 @@
 | 2026-11-06 | Doctor edits happen in the app; the database is the master copy from then on, with `spine.py export` (and download buttons) writing it back to CSV | Faster than editing CSVs; export keeps a re-importable copy |
 | 2026-11-06 | Anchor (rec/table, page) edits are logged in change_log by a trigger, like assertion edits | Full audit trail of who entered which reference |
 | 2026-11-06 | Graph drawn with Streamlit's built-in Graphviz chart; unchecked statements drawn dashed | No extra dependency; review status visible at a glance |
+| 2026-11-06 | Model: `qwen3:8b` via Ollama, thinking off, temperature 0, JSON-schema output | Correct on a 7-request scope set in ~3-7 s per call; llama3.1:8b was ~3x slower |
+| 2026-11-06 | Agents get no tools or DB access; code selects the rows each sees; every call logged in `agent_call` | Least privilege and a complete audit trail |
+| 2026-11-06 | Code rules can only make the Scope Guard stricter | A model mistake can cause a false refusal, never a patient-specific answer |
+| 2026-11-06 | Dose/treatment/device topics answered "Not found in sources" by a code rule before any planning | Live test: the model answered a dosing question with prevention content; the spine has no such statements |
+| 2026-11-06 | Planner gap list shown only when nothing could be planned | Live test: the model's "not covered" list was unreliable when it did produce an outline |
+| 2026-11-06 | Number check: every number in a claim must exist in its cited rows; declared values must equal spine value and unit | Code, not a model, decides whether a number is right |
