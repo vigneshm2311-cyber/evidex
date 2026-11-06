@@ -18,6 +18,8 @@ All agents run on a local model (Ollama, `qwen3:8b`, temperature 0, thinking off
 | 6 | Verifier (per section) | code + LLM support judge | one claim and **only** the spine sentences it cites; never the Synthesizer's prompt or reasoning | `supported` / `partly` / `not_supported` + reason | Code: cited rows still exist and are `accepted` (read from the database at check time); every number in the text matches a cited row's value and unit. A claim fails if any code check fails **or** the judge does not say `supported`. A failing claim is rewritten once by the Synthesizer with the problems listed; if it still fails it reaches the doctor flagged. |
 | 7 | Doctor review | human | everything | — | approve / edit / reject each claim; sign off | An edit re-runs the Verifier. Flagged claims cannot be approved; claims with numbers need "numbers checked". A disputed number can become a `proposed` spine row (the spine is unchanged until accepted). Sign-off needs every claim decided, records name and time, and locks the draft. All decisions go to `change_log`. |
 
+| 8 | Export | code only | the signed-off draft | — | PPTX / DOCX | Fidelity: every exported sentence equals an approved claim, no rejected/pending claim, no number outside approved claims, every approved claim present in the rendered file. Any failure blocks the download. Export logged with actor and SHA-256. |
+
 The prompts are constants at the top of `evidex/agents/steps.py` (`SCOPE_SYSTEM`, `PLANNER_SYSTEM`, `SYNTH_SYSTEM`) and `evidex/agents/verifier.py` (`SUPPORT_SYSTEM`).
 
 ## Known limits

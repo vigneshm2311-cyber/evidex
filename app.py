@@ -11,7 +11,7 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
-from evidex import drafts, pipeline
+from evidex import drafts, export, pipeline
 from evidex.agents import steps
 from evidex.spine import api
 from evidex.spine.vocab import OPERATORS, STATUSES
@@ -426,7 +426,7 @@ def review_draft(draft_id: str, ctx: str):
     m3.metric("To review", state["pending"])
     m4.metric("Flagged by Verifier", flagged)
     if locked:
-        st.success(f"Signed off by **{d['signed_by']}** on {d['signed_at']:%d %b %Y %H:%M}. Locked.")
+        st.success(f"Signed off by **{d['signed_by']}** on {d['signed_at'].astimezone():%d %b %Y %H:%M}. Locked.")
     elif not _who():
         st.info("Enter your name in the sidebar to review; every decision is logged with it.")
 
@@ -441,7 +441,24 @@ def review_draft(draft_id: str, ctx: str):
         st.warning(f"{len(state['unchecked_rows'])} spine row(s) behind approved claims are not yet checked "
                    "against your 2026 copy: " + ", ".join(f"`{x}`" for x in state["unchecked_rows"]))
     if locked:
-        st.button("Export PPTX / DOCX (checkpoint 5)", disabled=True, key=f"exp-{ctx}")
+        st.markdown("### Export")
+        st.caption("The file contains exactly the approved claim text, numbered references to the "
+                   "spine and its ADA anchors, and a note on how it was made. Every export is logged.")
+        order = ["pptx", "docx"] if d["artifact"] == "slides" else ["docx", "pptx"]
+        cols = st.columns(2)
+        for col, fmt in zip(cols, order):
+            try:
+                out = export.render(conn(), d["id"], fmt)
+            except export.ExportError as e:
+                col.error(str(e))
+                continue
+            col.download_button(
+                {"pptx": "⬇ Slides (PPTX)", "docx": "⬇ Handout (DOCX)"}[fmt], out["data"],
+                file_name=out["filename"], mime=out["mime"], key=f"dl-{ctx}-{fmt}",
+                type="primary" if fmt == order[0] else "secondary",
+                on_click=export.log_export,
+                args=(conn(), d["id"], fmt, _who() or d["signed_by"], out["sha256"], out["claims"]))
+            col.caption(f"Fidelity check passed · SHA-256 `{out['sha256'][:12]}…`")
         return
     for r in state["reasons"]:
         st.caption(f"• {r}")
@@ -455,7 +472,7 @@ def drafts_page():
     if not rows:
         st.info("No drafts yet. Create one in the Create tab.")
         return
-    labels = {r["id"]: f"{r['title']} · {r['created_at']:%d %b %H:%M} · "
+    labels = {r["id"]: f"{r['title']} · {r['created_at'].astimezone():%d %b %H:%M} · "
                        + ("signed off" if r["status"] == "signed_off" else f"{r['pending']}/{r['claims']} to review")
               for r in rows}
     ids = list(labels)

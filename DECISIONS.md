@@ -30,3 +30,6 @@
 | 2026-11-06 | Flagged claims cannot be approved; numbers need a "checked" tick; sign-off needs every claim decided and locks the draft (DB trigger) | No export of anything unreviewed |
 | 2026-11-06 | Unchecked spine rows behind approved claims produce a warning at sign-off, not a block | Doctor's choice; blocking would require checking all 93 rows first |
 | 2026-11-06 | A disputed number becomes a `proposed` spine row; the spine changes only when the doctor accepts it | "No AI agent writes to the spine"; edits flow back as proposals |
+| 2026-11-06 | Export built by code from the exact approved text; no AI Composer after sign-off | The signed text is what ships; an AI Composer would need its own review step (roadmap) |
+| 2026-11-06 | Export fidelity checked twice: on the document model and on the text read back from the rendered file | Catches layout code that drops or alters a claim |
+| 2026-11-06 | Exports logged in change_log with SHA-256 and claim IDs | Ties each file to its sign-off |
