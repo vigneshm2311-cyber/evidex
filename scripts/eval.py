@@ -111,5 +111,7 @@ gold = evaluate.gold_metrics(questions, results) if a.part in ("all", "gold") el
 out = E / "results" / f"{datetime.now():%Y%m%d-%H%M}.json"
 out.write_text(json.dumps({"meta": meta, "results": results, "auto": auto, "export_fidelity": fid,
                            "injection": inj, "gold": gold}, indent=1, default=str))
-(E / "REPORT.md").write_text(evaluate.report_md(meta, results, auto, fid, inj, gold))
+notes = E / "REPORT_NOTES.md"
+(E / "REPORT.md").write_text(evaluate.report_md(meta, results, auto, fid, inj, gold)
+                             + ("\n" + notes.read_text() if notes.exists() else ""))
 print(f"wrote {out.relative_to(ROOT)} and eval/REPORT.md")

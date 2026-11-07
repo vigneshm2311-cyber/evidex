@@ -276,7 +276,14 @@ def report_md(meta: dict, results: list[dict], auto: dict | None, fid: dict | No
               f"- Code Verifier caught: {_fmt(inj['code_caught_pct'], [inj['code_caught'], inj['injected']])}",
               f"- LLM support judge alone caught: {_fmt(inj['judge_caught_pct'], [inj['judge_caught'], inj['judge_judged']])}"]
     if gold:
-        L += ["", "## C. Gold-labelled metrics (labels by the doctor)", ""]
+        by = gold.get("labelled_by") or []
+        draft = any("claude" in b.lower() for b in by)
+        L += ["", "## C. Gold-labelled metrics" + (" (DRAFT labels by Claude, not yet reviewed by the doctor)"
+                                                   if draft else " (labels by the doctor)"), ""]
+        if draft and gold["labelled"]:
+            L += ["> These labels were written by Claude at the doctor's request, after seeing the system's "
+                  "outputs, so they are not independent of the system. Treat these numbers as provisional until "
+                  "the doctor reviews `eval/questions.csv` and puts their own name in `labelled_by`.", ""]
         if not gold["labelled"]:
             L += [f"Not computed: none of the {len(gold['unlabelled'])} questions has a gold label yet "
                   "(`eval/questions.csv`)."]
@@ -291,7 +298,8 @@ def report_md(meta: dict, results: list[dict], auto: dict | None, fid: dict | No
                   f"- Must-cite recall: {_fmt(gold['must_cite_recall_pct'])} over {gold['must_cite_n']} question(s)"]
     errs = [r["id"] for r in results if r["outcome"] == "error"]
     L += ["", "## Limits", "",
-          "- Small question set drafted by the team; gold labels are the doctor's own.",
+          "- Small question set drafted by the team; gold labels by: "
+          + (", ".join(gold["labelled_by"]) if gold and gold.get("labelled_by") else "none yet") + ".",
           "- Spine values not yet fully checked against the 2026 text (see header); metrics measure agreement with the spine, not clinical truth.",
           "- One local 8B model; results may differ with other models or runs.",
           f"- Errors during the run: {', '.join(errs) if errs else 'none'}."]
