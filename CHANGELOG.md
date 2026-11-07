@@ -41,3 +41,4 @@
 - Rules: `docs/PRODUCT_RULES.md`; `docs/SCOPE.md` amended (rules 9-11, approved by the doctor).
 - Tests: `tests/test_studio.py` (22). Literature layer not yet covered by `scripts/eval.py`.
 - "Not found" now offers 3 clickable in-scope alternatives closest to the request (`studio.SUGGESTIONS`, ranked by shared words; a test checks every suggestion passes the topic rules). "often"/"frequently" no longer read as topic words. Found by the doctor ("Diabetes homecare handout").
+- Groq free-tier rate limits: the client now waits them out (up to ~3 minutes in all, honouring retry-after) instead of failing the draft after ~20 s; clearer message if it still fails. Found by the doctor on the live app.

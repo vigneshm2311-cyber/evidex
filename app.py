@@ -850,8 +850,9 @@ def phase_building():
                    "classification, screening and prevention of diabetes. Close to what you asked, it can make:")
         suggest_buttons(d.get("suggestions") or [], "build")
     else:
-        st.error("The draft could not be finished: " + str(d.get("error") or "no statements were produced")
-                 + ". Please try again.")
+        why = str(d.get("error") or "no statements were produced").replace("LLMError: ", "")
+        st.error(f"The draft could not be finished: {why}. Your request is kept: press **Back** and "
+                 "**Build it** again.")
     if st.button("← Back to my request", type="primary"):
         sx().update(phase="confirm")
         st.query_params.pop("job", None)

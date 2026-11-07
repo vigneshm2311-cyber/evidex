@@ -93,22 +93,28 @@ class GroqLLM:
         req = urllib.request.Request(self.URL, json.dumps(body).encode(), {
             "Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
             "User-Agent": "evidex/1.0"})
-        for attempt in range(4):
+        # The free tier allows ~8,000 tokens a minute, so a busy minute is normal: wait it out
+        # (up to about 3 minutes in all) rather than fail the whole draft.
+        waited = 0.0
+        for attempt in range(10):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     return json.load(r)
             except urllib.error.HTTPError as e:
                 detail = e.read().decode(errors="replace")[:300]
-                if e.code == 429 or e.code >= 500:  # rate limit or server hiccup: wait and retry
-                    wait = float(e.headers.get("retry-after") or 2 ** attempt)
-                    time.sleep(min(wait, 20))
+                if (e.code == 429 or e.code >= 500) and waited < 180:  # rate limit or server hiccup
+                    wait = min(max(float(e.headers.get("retry-after") or 0), 2 ** attempt, 3), 45)
+                    time.sleep(wait)
+                    waited += wait
                     continue
+                if e.code == 429:
+                    break
                 raise LLMError(f"Groq HTTP {e.code}: {detail}") from e
             except urllib.error.URLError as e:
-                if attempt == 3:
+                if attempt >= 3:
                     raise LLMError(f"cannot reach Groq: {e}") from e
                 time.sleep(2 ** attempt)
-        raise LLMError("Groq kept rate-limiting the request; try again in a minute")
+        raise LLMError("the AI service is busy right now (free-tier limit); please try again in a few minutes")
 
     def chat_json(self, system: str, user: str, schema: dict) -> dict:
         body = {
