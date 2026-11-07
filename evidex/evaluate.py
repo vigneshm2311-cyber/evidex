@@ -277,13 +277,18 @@ def report_md(meta: dict, results: list[dict], auto: dict | None, fid: dict | No
               f"- LLM support judge alone caught: {_fmt(inj['judge_caught_pct'], [inj['judge_caught'], inj['judge_judged']])}"]
     if gold:
         by = gold.get("labelled_by") or []
-        draft = any("claude" in b.lower() for b in by)
-        L += ["", "## C. Gold-labelled metrics" + (" (DRAFT labels by Claude, not yet reviewed by the doctor)"
-                                                   if draft else " (labels by the doctor)"), ""]
-        if draft and gold["labelled"]:
-            L += ["> These labels were written by Claude at the doctor's request, after seeing the system's "
-                  "outputs, so they are not independent of the system. Treat these numbers as provisional until "
-                  "the doctor reviews `eval/questions.csv` and puts their own name in `labelled_by`.", ""]
+        claude = any("claude" in b.lower() for b in by)
+        approved = claude and all("approved" in b.lower() for b in by)
+        title = (" (drafted by Claude, approved by the doctor)" if approved
+                 else " (DRAFT labels by Claude, not yet reviewed by the doctor)" if claude
+                 else " (labels by the doctor)")
+        L += ["", "## C. Gold-labelled metrics" + title, ""]
+        if claude and gold["labelled"]:
+            L += ["> The labels were drafted by Claude after seeing the system's outputs"
+                  + (" and then approved by the doctor without changes" if approved else "")
+                  + ", so they are not fully independent of the system. "
+                  + ("" if approved else "Treat these numbers as provisional until the doctor reviews "
+                     "`eval/questions.csv` and puts their own name in `labelled_by`."), ""]
         if not gold["labelled"]:
             L += [f"Not computed: none of the {len(gold['unlabelled'])} questions has a gold label yet "
                   "(`eval/questions.csv`)."]

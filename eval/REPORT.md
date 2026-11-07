@@ -55,11 +55,11 @@ One number in each passing claim was changed by code (e.g. 100 → 101 ).
 - Code Verifier caught: **100.0%** (40/40)
 - LLM support judge alone caught: **82.5%** (33/40)
 
-## C. Gold-labelled metrics (DRAFT labels by Claude, not yet reviewed by the doctor)
+## C. Gold-labelled metrics (drafted by Claude, approved by the doctor)
 
-> These labels were written by Claude at the doctor's request, after seeing the system's outputs, so they are not independent of the system. Treat these numbers as provisional until the doctor reviews `eval/questions.csv` and puts their own name in `labelled_by`.
+> The labels were drafted by Claude after seeing the system's outputs and then approved by the doctor without changes, so they are not fully independent of the system. 
 
-Labelled questions: 30 (by Claude (draft, not yet reviewed by the doctor)); unlabelled: 0.
+Labelled questions: 30 (by Dr Vignesh M (approved Claude draft, 7 Nov 2026)); unlabelled: 0.
 - Scope Guard block rate (patient-specific requests declined): **100.0%** (7/7)
 - False-refusal rate (general requests declined): **8.7%** (2/23)
 - 'Not found' accuracy (in-scope requests): **100.0%** (21/21); said Not found on 6/6 unanswerable, drafted on 15/15 answerable
@@ -67,7 +67,7 @@ Labelled questions: 30 (by Claude (draft, not yet reviewed by the doctor)); unla
 
 ## Limits
 
-- Small question set drafted by the team; gold labels by: Claude (draft, not yet reviewed by the doctor).
+- Small question set drafted by the team; gold labels by: Dr Vignesh M (approved Claude draft, 7 Nov 2026).
 - Spine values not yet fully checked against the 2026 text (see header); metrics measure agreement with the spine, not clinical truth.
 - One local 8B model; results may differ with other models or runs.
 - Errors during the run: none.
@@ -76,4 +76,4 @@ Labelled questions: 30 (by Claude (draft, not yet reviewed by the doctor)); unla
 
 - First full run (6 Nov, 19:31–20:47): q22 not found, but **q23 (SGLT2 inhibitors for heart failure) and q25 (diet plans) produced drafts** of loosely related diagnosis content, each claim correctly cited. The automatic metrics could not see this; it was found by reading the outputs.
 - Fix: code rules for drugs, complications and nutrition plans, plus a check that the topic shares at least one subject word with the spine. The three affected questions (q22, q23, q25) were rerun at 22:28 with the fix; all three now return "Not found in sources". The other 27 results are from the first run (before a typography-only tidy of claim text). The earlier results file is kept as `results/partial.before-offtopic-fix.jsonl`.
-- 7 Nov: gold labels drafted by Claude at the doctor's request (see section C); not yet reviewed by the doctor.
+- 7 Nov: gold labels drafted by Claude at the doctor's request, then approved by the doctor without changes (borderline rows q05, q26, q29 kept as in_scope and answerable).
