@@ -15,8 +15,11 @@
 ## Good to know
 - Evidex grounds every draft in a doctor-curated knowledge base from the ADA Standards of Care 2026 (diagnosis, classification, screening, prevention) and adds context from recent PubMed research and any files you attach. Every PubMed reference comes from PubMed itself, and every number is checked by code against its source.
 - Hosted on Streamlit Community Cloud with the database on Supabase (Mumbai). The language model is Qwen3.8-27B on Groq: your request, file text and the selected sources are sent to it, so use general topics and papers only, never patient details (a check blocks files that look like patient records).
+- **Free AI tier:** the prototype runs on Groq's free tier (about 8,000 tokens a minute and 200,000 a day per model, shared by all evaluators; roughly 8–15 drafts a day per model). A busy minute makes a draft slower; when a model's daily cap is reached Evidex switches to backup models automatically. If a draft is slow or fails, please try again in a few minutes.
 - One draft is built at a time; if another evaluator is building one, the app asks you to wait a minute. Limit: 10 requests per hour per visitor.
 - **Library** holds the knowledge base (encyclopedia, graph, and the doctor's verification progress). Editing it needs the doctor's separate code.
 - Drafts you create are visible to other evaluators in **My drafts**. Evidex gives general teaching material only, never advice about an individual patient.
 
-**Contact:** TODO(doctor) email
+**Demo video:** https://drive.google.com/file/d/1Jach-O1yG04XrHin774niluvRJNw7RR_/view?usp=sharing
+
+**Contact:** Dr Vignesh M · vigneshm2311@gmail.com · Mughil · mughilarul@gmail.com

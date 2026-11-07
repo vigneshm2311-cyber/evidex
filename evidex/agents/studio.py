@@ -6,6 +6,8 @@ The material the agents see is a mix of spine rows (the grounding layer) and lit
 """
 from __future__ import annotations
 
+import re
+
 from ..llm import LLM, call_logged
 from . import steps
 
@@ -103,8 +105,9 @@ def plan(llm: LLM, understanding: dict, artifact: str, persona: str, rows: list[
     sections = []
     for s in out["sections"]:
         ids = [i for i in dict.fromkeys(s["assertion_ids"]) if i in valid]
-        if ids:
-            sections.append({"heading": s["heading"].strip(), "assertion_ids": ids})
+        if ids:  # the app numbers steps and slides itself: drop "Step 2:" / "Slide 3 -" from headings
+            heading = re.sub(r"^\s*(step|slide|section|part)\s*\d+\s*[:.\-–·]\s*", "", s["heading"], flags=re.I).strip()
+            sections.append({"heading": heading or s["heading"].strip(), "assertion_ids": ids})
     limit = {"flowchart": 6, "onepager": 4}.get(artifact)
     if limit:
         sections = sections[:limit]
