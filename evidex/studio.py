@@ -56,8 +56,10 @@ def read_files(files: list[tuple[str, bytes]]) -> tuple[list[dict], list[str]]:
 
 
 def understand(conn, llm: LLM, request: str, persona: str, artifact: str, files: list[dict],
-               *, log: bool = True) -> dict:
-    """Phase 1. Returns {"status": ok | declined | not_found | blocked | error, ...}."""
+               *, log: bool = True, on_step=None) -> dict:
+    """Phase 1. Returns {"status": ok | declined | not_found | blocked | error, ...}.
+    on_step(text) is called as each step starts, for the loading screen."""
+    step = on_step or (lambda _t: None)
     run_id = "u-" + uuid.uuid4().hex[:10]
     log_conn = conn if log else None
     request = (request or "").strip()
@@ -69,17 +71,20 @@ def understand(conn, llm: LLM, request: str, persona: str, artifact: str, files:
                 f"({', '.join(pii)}). Evidex makes general teaching material only."}
     try:
         if request:
+            step("Checking it is a general teaching topic")
             note = (f"\n(Attached: {', '.join(f['name'] for f in files)})" if files else "")
             guard = steps.scope_guard(llm, request + note, run_id=run_id, log_conn=log_conn,
                                       system=steps.STUDIO_SCOPE_SYSTEM)
             if guard["label"] == "out_of_scope":
                 return {"status": "declined", "reason": guard["reason"],
                         "general_query": guard.get("general_query", ""), "run_id": run_id}
+        step("Reading your files and working out what you need" if files else "Working out what you need")
         u = studio.understand(llm, request, persona, artifact, files, run_id=run_id, log_conn=log_conn)
     except LLMError as e:
         return {"status": "error", "message": f"Evidex could not read the request ({e}). Please try again."}
     u.update(persona=persona, artifact=artifact, request=request, run_id=run_id,
              files=[f["name"] for f in files])
+    step("Checking Evidex covers this topic")
     gap = topic_gap(conn, u["topic"])
     if gap:
         return {"status": "not_found", "understanding": u, "reason": gap, "run_id": run_id,

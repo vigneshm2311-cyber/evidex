@@ -35,6 +35,6 @@ RUNS_PER_HOUR = "10"
 - Root-level secrets are copied into the environment at start-up (`app.py`), so the code reads them like `.env`.
 - A free Streamlit app sleeps after a period without visitors; the first visit wakes it (about 30 s).
 - Drafts run in a background thread; if the app restarts mid-run that run is lost, but finished drafts are in the database.
-- Groq's free tier has rate limits; the client waits and retries on HTTP 429. One draft runs at a time.
+- Groq's free tier allows ~8,000 tokens a minute and **200,000 tokens a day per model** (about 8-15 drafts). The client waits out a busy minute (up to ~3 min); when the main model's daily allowance is used up it switches to the backup models in `LLM_FALLBACKS` (default `openai/gpt-oss-120b,openai/gpt-oss-20b`, each with its own allowance). The model actually used is logged per call and named in each export's note. Groq's paid Dev tier removes the daily cap.
 - The request text and the selected spine rows are sent to Groq. Evidex is for general teaching topics only; no patient data.
 - Evaluation results for the hosted model: `eval/REPORT.md` (re-run with `LLM_PROVIDER=groq`).

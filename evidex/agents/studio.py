@@ -114,7 +114,7 @@ def plan(llm: LLM, understanding: dict, artifact: str, persona: str, rows: list[
 
 def _short_line(a: dict) -> str:
     if a.get("kind") in ("pubmed", "upload"):
-        return f"{a['id']} | {a['title']} | {(a.get('passage') or a['body'])[:400]}"
+        return f"{a['id']} | {a['title']} | {(a.get('passage') or a['body'])[:260]}"
     return steps.assertion_line(a)
 
 

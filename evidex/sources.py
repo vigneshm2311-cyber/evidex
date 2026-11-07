@@ -147,12 +147,23 @@ def chunks(text: str, size: int = 700) -> list[str]:
     return out
 
 
-def passage(doc: dict, query: str, limit: int = 1800) -> str:
+def passage(doc: dict, query: str, limit: int = 1200) -> str:
     """The part of a source a model should see for this query: the whole abstract for PubMed,
     the best-matching passages for an uploaded file."""
     body = doc["body"]
-    if doc["kind"] == "pubmed" or len(body) <= limit:
-        return body[:limit * 2]
+    if len(body) <= limit * 1.5:
+        return body
+    if doc["kind"] == "pubmed":  # long abstract: keep the parts that match, results first
+        q = _words(query) | {"results", "conclusions", "conclusion"}
+        sents = re.split(r"(?<=[.!?])\s+", body)
+        keep = sorted(range(len(sents)), key=lambda i: -len(q & _words(sents[i])))
+        out, total = set(), 0
+        for i in keep:
+            if total + len(sents[i]) > limit * 1.5:
+                continue
+            out.add(i)
+            total += len(sents[i])
+        return " ".join(sents[i] for i in sorted(out))
     q = _words(query)
     parts = chunks(body)
     ranked = sorted(range(len(parts)), key=lambda i: -len(q & _words(parts[i])))

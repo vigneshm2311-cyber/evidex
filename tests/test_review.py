@@ -1,4 +1,5 @@
 """Verifier and doctor-review rules (fake model, local test database)."""
+import re
 import sys
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def test_support_judge_partly_flags_and_one_rewrite_fixes(conn):
 
     def support(user):
         calls["n"] += 1
-        n = user.count("\nSources:")
+        n = len(re.findall(r"(?m)^Claim \d+ ", user))
         # first judgement of the Criteria section: claim 1 overreaches; everything else fine
         if calls["n"] == 1:
             return [{"claim": 1, "verdict": "partly", "reason": "adds 'only test needed'"}] + [
@@ -52,7 +53,7 @@ def test_support_judge_partly_flags_and_one_rewrite_fixes(conn):
 
 def test_claim_still_failing_after_retry_stays_flagged(conn):
     def support(user):
-        n = user.count("\nSources:")
+        n = len(re.findall(r"(?m)^Claim \d+ ", user))
         return [{"claim": i, "verdict": "not_supported", "reason": "no"} for i in range(1, n + 1)]
     d = make_draft(conn, FakeLLM(plan=GOOD_PLAN, claims=GOOD_CLAIMS, support=support))
     assert all(not c["verdict"]["ok"] for c in d["claims"])

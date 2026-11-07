@@ -157,3 +157,18 @@ def test_suggestions_are_close_to_what_was_asked():
     assert studio.suggestions("insulin pump settings for type 1 diabetes")[0].startswith("Type 1 diabetes")
     assert any("gestational" in s for s in studio.suggestions("diabetes in pregnant women"))
     assert len(studio.suggestions("")) == 3
+
+
+def test_support_judge_lists_each_source_once():
+    from evidex.agents import verifier
+
+    class Spy:
+        model = "spy"
+        def chat_json(self, system, user, schema):
+            self.user = user
+            return {"verdicts": [{"claim": i, "verdict": "supported", "reason": "ok"} for i in (1, 2, 3)]}
+    spy = Spy()
+    src = {**SRC, "passage": SRC["body"]}
+    verifier.judge_support(spy, [("a", [src]), ("b", [src]), ("c", [src])], run_id="t")
+    assert spy.user.count("Among 1,234 adults") == 1
+    assert "Claim 3 (its sources: pmid:1): c" in spy.user

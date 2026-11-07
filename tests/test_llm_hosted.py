@@ -44,3 +44,33 @@ def test_provider_switch(monkeypatch):
     assert isinstance(m, llm.GroqLLM) and m.model == "qwen/qwen3.8-27b"
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     assert isinstance(llm.make_llm(), llm.OllamaLLM)
+
+
+def test_daily_cap_moves_to_the_backup_model(monkeypatch):
+    from evidex import llm as L
+    L.GroqLLM._exhausted.clear()
+    m = L.GroqLLM(model="main", api_key="k", fallbacks=["backup1", "backup2"])
+    seen = []
+
+    def post(body):
+        seen.append(body["model"])
+        if body["model"] == "main":
+            raise L.DailyCap(600)
+        return {"choices": [{"message": {"content": '{"label": "x"}'}}]}
+    monkeypatch.setattr(m, "_post", post)
+    schema = {"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]}
+    assert m.chat_json("s", "u", schema) == {"label": "x"} and m.model == "backup1"
+    assert m.chat_json("s", "u", schema) == {"label": "x"}
+    assert seen == ["main", "backup1", "backup1"]          # the capped model is skipped until it frees up
+    L.GroqLLM._exhausted.clear()
+
+
+def test_all_models_capped_gives_a_plain_message(monkeypatch):
+    import pytest
+    from evidex import llm as L
+    L.GroqLLM._exhausted.clear()
+    m = L.GroqLLM(model="main", api_key="k", fallbacks=["backup"])
+    monkeypatch.setattr(m, "_post", lambda body: (_ for _ in ()).throw(L.DailyCap(300)))
+    with pytest.raises(L.LLMError, match="today's free AI allowance"):
+        m.chat_json("s", "u", {"type": "object"})
+    L.GroqLLM._exhausted.clear()

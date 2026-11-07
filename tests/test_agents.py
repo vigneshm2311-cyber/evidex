@@ -1,4 +1,5 @@
 """Pipeline tests with a scripted fake model (no Ollama needed)."""
+import re
 import json
 import os
 import sys
@@ -55,7 +56,7 @@ class FakeLLM:
             c = self.claims.get(heading, [])
             return {"claims": c(user) if callable(c) else c}
         if system is verifier.SUPPORT_SYSTEM:
-            n = user.count("\nSources:")
+            n = len(re.findall(r"(?m)^Claim \d+ ", user))
             if callable(self.support):
                 return {"verdicts": self.support(user)}
             return {"verdicts": [{"claim": i, "verdict": "supported", "reason": "ok"} for i in range(1, n + 1)]}

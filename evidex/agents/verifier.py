@@ -17,7 +17,8 @@ The sources are entries from a guideline knowledge base and, for some claims, a 
 or a passage from an uploaded paper. Judge ONLY against the sources given with each claim, not your
 own knowledge.
 
-For each claim answer:
+The sources are listed once; each claim names the IDs of its own sources. Judge each claim only
+against ITS sources. For each claim answer:
 - "supported": everything the claim says is stated in its sources (rewording is fine).
 - "partly": part is supported, but the claim adds, broadens or changes something.
 - "not_supported": the sources do not say this, or a number differs.
@@ -82,10 +83,16 @@ def judge_support(llm: LLM, items: list[tuple[str, list[dict]]], *, run_id: str,
     """items: (claim text, cited rows). Returns one {verdict, reason} per item, in order."""
     if not items:
         return []
-    blocks = []
+    # Each source is listed once (an abstract cited by three claims is not sent three times);
+    # each claim names the IDs of its own sources.
+    unique: dict[str, dict] = {}
+    for _, rows in items:
+        for a in rows:
+            unique.setdefault(a["id"], a)
+    blocks = ["Sources:\n" + "\n".join(f"- {steps.assertion_line(a)}" for a in unique.values())]
     for n, (text, rows) in enumerate(items, 1):
-        src = "\n".join(f"  - {steps.assertion_line(a)}" for a in rows) or "  (none)"
-        blocks.append(f"Claim {n}: {text}\nSources:\n{src}")
+        ids = ", ".join(a["id"] for a in rows) or "none"
+        blocks.append(f"Claim {n} (its sources: {ids}): {text}")
 
     def check(out):
         got = sorted(v["claim"] for v in out["verdicts"])

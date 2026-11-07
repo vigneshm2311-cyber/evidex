@@ -78,12 +78,31 @@ def schema_problems(value, schema: dict, path: str = "reply") -> list[str]:
     return out
 
 
-class GroqLLM:
-    """Hosted model through Groq's OpenAI-compatible API (JSON mode; schema checked in code)."""
-    URL = "https://api.groq.com/openai/v1/chat/completions"
+class DailyCap(Exception):
+    """Groq said this model's daily allowance (tokens or requests per day) is used up."""
+    def __init__(self, wait_s: float):
+        super().__init__(f"daily cap, retry in {wait_s:.0f} s")
+        self.wait_s = wait_s
 
-    def __init__(self, model: str | None = None, api_key: str | None = None, timeout: int = 120):
-        self.model = model or os.environ.get("LLM_MODEL") or "qwen/qwen3.8-27b"
+
+class GroqLLM:
+    """Hosted model through Groq's OpenAI-compatible API (JSON mode; schema checked in code).
+
+    The free tier caps each model per day. When the main model's daily allowance is used up,
+    calls move to the backup models (LLM_FALLBACKS), each with its own allowance; the model
+    actually used is what agent_call logs."""
+    URL = "https://api.groq.com/openai/v1/chat/completions"
+    _exhausted: dict[str, float] = {}           # model -> time when it may be tried again (shared)
+    _lock = __import__("threading").Lock()
+
+    def __init__(self, model: str | None = None, api_key: str | None = None, timeout: int = 120,
+                 fallbacks: list[str] | None = None):
+        self.primary = model or os.environ.get("LLM_MODEL") or "qwen/qwen3.8-27b"
+        if fallbacks is None:
+            fallbacks = [m.strip() for m in os.environ.get(
+                "LLM_FALLBACKS", "openai/gpt-oss-120b,openai/gpt-oss-20b").split(",") if m.strip()]
+        self.chain = [self.primary] + [m for m in fallbacks if m != self.primary]
+        self.model = self.primary
         self.api_key = api_key or os.environ.get("GROQ_API_KEY", "")
         self.timeout = timeout
         if not self.api_key:
@@ -93,17 +112,20 @@ class GroqLLM:
         req = urllib.request.Request(self.URL, json.dumps(body).encode(), {
             "Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
             "User-Agent": "evidex/1.0"})
-        # The free tier allows ~8,000 tokens a minute, so a busy minute is normal: wait it out
-        # (up to about 3 minutes in all) rather than fail the whole draft.
+        # A busy minute (~8,000 tokens a minute) is normal: wait it out, up to about 3 minutes.
+        # A daily cap is not worth waiting for: raise DailyCap so the next model is used.
         waited = 0.0
         for attempt in range(10):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     return json.load(r)
             except urllib.error.HTTPError as e:
-                detail = e.read().decode(errors="replace")[:300]
-                if (e.code == 429 or e.code >= 500) and waited < 180:  # rate limit or server hiccup
-                    wait = min(max(float(e.headers.get("retry-after") or 0), 2 ** attempt, 3), 45)
+                detail = e.read().decode(errors="replace")[:400]
+                retry_after = float(e.headers.get("retry-after") or 0)
+                if e.code == 429 and re.search(r"per day|\(TPD\)|\(RPD\)", detail):
+                    raise DailyCap(max(retry_after, 60)) from e
+                if (e.code == 429 or e.code >= 500) and waited < 180:
+                    wait = min(max(retry_after, 2 ** attempt, 3), 45)
                     time.sleep(wait)
                     waited += wait
                     continue
@@ -116,24 +138,39 @@ class GroqLLM:
                 time.sleep(2 ** attempt)
         raise LLMError("the AI service is busy right now (free-tier limit); please try again in a few minutes")
 
+    def _available(self) -> list[str]:
+        now = time.time()
+        with self._lock:
+            return [m for m in self.chain if self._exhausted.get(m, 0) <= now]
+
     def chat_json(self, system: str, user: str, schema: dict) -> dict:
-        body = {
-            "model": self.model,
-            "temperature": 0,
-            "reasoning_effort": "none",
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system + "\n\nReply with one JSON object only, matching this "
-                                                       "JSON schema:\n" + json.dumps(schema)},
-                {"role": "user", "content": user}],
-        }
-        try:
-            reply = self._post(body)
-        except LLMError as e:
-            if "reasoning_effort" not in str(e):
-                raise
-            body.pop("reasoning_effort")
-            reply = self._post(body)
+        messages = [
+            {"role": "system", "content": system + "\n\nReply with one JSON object only, matching this "
+                                                   "JSON schema:\n" + json.dumps(schema)},
+            {"role": "user", "content": user}]
+        reply = None
+        for m in self._available():
+            body = {"model": m, "temperature": 0, "response_format": {"type": "json_object"},
+                    "messages": messages,
+                    "reasoning_effort": "low" if m.startswith("openai/gpt-oss") else "none"}
+            try:
+                try:
+                    reply = self._post(body)
+                except LLMError as e:
+                    if "reasoning_effort" not in str(e):
+                        raise
+                    body.pop("reasoning_effort")
+                    reply = self._post(body)
+            except DailyCap as cap:
+                with self._lock:
+                    self._exhausted[m] = time.time() + cap.wait_s
+                continue
+            self.model = m
+            break
+        if reply is None:
+            soon = min(self._exhausted.get(m, 0) for m in self.chain) - time.time()
+            raise LLMError("Evidex has used today's free AI allowance; it frees up gradually, so please try "
+                           f"again in about {max(1, round(soon / 60))} minute(s)")
         text = reply["choices"][0]["message"].get("content") or ""
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
         try:

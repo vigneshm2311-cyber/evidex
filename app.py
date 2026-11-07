@@ -90,7 +90,7 @@ def conn():
     return c
 
 
-@st.cache_data(ttl=300, show_spinner="Loading the spine…")
+@st.cache_data(ttl=300, show_spinner="Loading Evidex…")
 def load():
     return api.all_concepts(conn()), api.all_assertions(conn())
 
@@ -718,8 +718,12 @@ def phase_request():
         sx()["notice"] = ("warning", "Evidex is busy with another request. Please try again in a minute.")
         st.rerun()
     try:
-        with st.spinner("Reading your request…"):
-            res = studio.understand(conn(), model(), request, persona, artifact, texts)
+        with st.status("Understanding your request…", expanded=True) as box:
+            if texts:
+                st.write(f"✅ Read {len(texts)} file(s): " + ", ".join(f["name"] for f in texts))
+            res = studio.understand(conn(), model(), request, persona, artifact, texts,
+                                    on_step=lambda t: st.write(f"🔄 {t}…"))
+            box.update(label="Done" if res["status"] == "ok" else "Checked", state="complete", expanded=False)
     finally:
         lock.release()
     st.session_state.run_times.append(__import__("time").time())
@@ -795,7 +799,23 @@ def phase_confirm():
     st.rerun()
 
 
-@st.fragment(run_every=3)
+BUILD_TIPS = [
+    "Definitions and cut-offs come from the ADA Standards of Care 2026 knowledge base.",
+    "Recent PubMed research adds context; every reference links to PubMed itself.",
+    "Every number is checked by code against the source it cites.",
+    "A statement that fails a check is rewritten once, then shown to you to fix.",
+    "Nothing is downloaded until you approve the draft.",
+]
+STEP_DETAIL = {
+    "files": "Saving the text of your files so every statement can point back to it.",
+    "spine_lookup": "Finding the guideline entries that ground this topic.",
+    "research": "Searching PubMed for recent reviews, trials and guidelines.",
+    "planner": "Planning the outline around your questions.",
+    "writing": "Writing each part for your audience, then checking every number against its source.",
+}
+
+
+@st.fragment(run_every=2)
 def building_progress(job_id: str):
     job = jobs.get(job_id)
     if job is None:
@@ -804,25 +824,46 @@ def building_progress(job_id: str):
         st.rerun()
     seen = {e["step"].split(":")[0] for e in job.events}
     has_files = bool(sx().get("files")) or "files" in seen
+    plan = next((e["data"] for e in job.events if e["step"] == "planner" and e["status"] == "ok"), None)
+    headings = [x["heading"] for x in plan["sections"]] if plan else []
+    written = [e["step"].split(":", 1)[1] for e in job.events if e["step"].startswith("writing:")]
+    order = [k for k, _ in PLAIN_STEPS if k != "files" or has_files]
+    current = next((k for k in order if k not in seen), None) or "writing"
+    # progress: fixed steps count 1 each, each section counts 2 (writing + checking)
+    fixed = [k for k in order if k != "writing"]
+    total = len(fixed) + 2 * max(len(headings), 4)
+    done_units = sum(k in seen for k in fixed) + 2 * len(written)
+    frac = min(done_units / total, 0.97)
+    left_s = max(0, (len(headings) - len(written)) * 45) if headings else None
+
     with st.container(border=True):
         art = (sx().get("understanding") or {}).get("artifact")
-        st.markdown(f"#### Building your {FORMAT_NOUN.get(art, 'draft')}…")
-        st.caption(f"{job.elapsed:.0f} s so far · usually 2–5 minutes. You can leave this page; the draft is "
-                   "saved to **My drafts** when it is ready.")
-        order = [k for k, _ in PLAIN_STEPS if k != "files" or has_files]
-        current = next((k for k in order if k not in seen), None)
-        for key, label in PLAIN_STEPS:
-            if key not in order:
-                continue
-            if key in seen and key != current and key != "writing":
-                st.markdown(f"✅ {label}")
-            elif key == current or (key == "writing" and current is None):
-                st.markdown(f"⏳ **{label}**")
-            else:
-                st.markdown(f"⚪ {label}")
-        written = [e["step"].split(":", 1)[1] for e in job.events if e["step"].startswith("writing:")]
-        if written:
-            st.caption("Written: " + " · ".join(written))
+        st.markdown(f"#### ⏳ Building your {FORMAT_NOUN.get(art, 'draft')}")
+        eta = (f" · about {max(1, round(left_s / 60))} min left" if left_s else "")
+        st.progress(frac, text=f"{int(frac * 100)}% · {job.elapsed:.0f} s{eta}")
+        c1, c2 = st.columns([1.1, 1])
+        with c1:
+            for key, label in PLAIN_STEPS:
+                if key not in order:
+                    continue
+                if key in seen and key != current:
+                    st.markdown(f"✅ {label}")
+                elif key == current:
+                    st.markdown(f"🔄 **{label}**")
+                    st.caption(STEP_DETAIL[key])
+                else:
+                    st.markdown(f"<span style='opacity:.45'>○ {label}</span>", unsafe_allow_html=True)
+        with c2:
+            if headings:
+                st.markdown("**Outline**")
+                for i, h in enumerate(headings):
+                    mark = "✅" if h in written else ("🔄" if i == len(written) else "○")
+                    st.markdown(f"{mark} {h}")
+            papers = next((e["data"].get("papers") for e in job.events if e["step"] == "research"), None)
+            if papers:
+                st.caption(f"📚 {len(papers)} recent paper(s) found on PubMed")
+        st.info("💡 " + BUILD_TIPS[int(job.elapsed // 8) % len(BUILD_TIPS)])
+        st.caption("You can leave this page: the draft is saved to **My drafts** when it is ready.")
 
 
 def phase_building():
@@ -918,7 +959,7 @@ def statement_row(c: dict, nums: dict[str, int], locked: bool, ctx: str):
                 st.session_state.flash_error = "Evidex is busy; try saving again in a minute."
             else:
                 try:
-                    with st.spinner("Checking…"):
+                    with st.spinner("Re-checking this statement against its sources (10–30 s)…"):
                         _act(drafts.edit, conn(), model(), c["id"], _who() or "reviewer", new,
                              ok_msg="Saved and re-checked")
                 finally:
@@ -943,6 +984,12 @@ def flowchart_preview(sections: list[dict]):
     lines.append("}")
     st.graphviz_chart("\n".join(lines), use_container_width=False)
     st.caption("Edit or remove any statement in the steps below; the flowchart follows.")
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=60)
+def rendered_file(draft_id: str, fmt: str) -> dict:
+    """A signed-off draft is locked, so its files never change: build each once."""
+    return export.render(conn(), draft_id, fmt)
 
 
 def draft_view(draft_id: str, ctx: str):
@@ -984,7 +1031,8 @@ def draft_view(draft_id: str, ctx: str):
         cols = st.columns(len(export.DOWNLOADS.get(art, ["pptx", "docx"])))
         for n, (col, fmt) in enumerate(zip(cols, export.DOWNLOADS.get(art, ["pptx", "docx"]))):
             try:
-                out = export.render(conn(), d["id"], fmt)
+                with st.spinner(f"Preparing your {export.LABELS[fmt]}…"):
+                    out = rendered_file(d["id"], fmt)
             except export.ExportError as e:
                 col.error(str(e).replace("export blocked: ", ""))
                 continue
@@ -1011,14 +1059,16 @@ def draft_view(draft_id: str, ctx: str):
             if go:
                 st.session_state.approver = name.strip()
                 ok = True
-                for c in d["claims"]:
-                    if c["status"] == "pending" and c["verdict"].get("ok"):
-                        if _act(drafts.decide, conn(), c["id"], name.strip(), "approved", numbers_checked=True) is None:
-                            ok = False
-                            break
-                if ok and _act(drafts.sign_off, conn(), d["id"], name.strip(),
-                               ok_msg="Approved. Your files are ready.") is not None:
-                    st.balloons()
+                with st.spinner("Approving and preparing your files…"):
+                    for c in d["claims"]:
+                        if c["status"] == "pending" and c["verdict"].get("ok"):
+                            if _act(drafts.decide, conn(), c["id"], name.strip(), "approved",
+                                    numbers_checked=True) is None:
+                                ok = False
+                                break
+                    if ok and _act(drafts.sign_off, conn(), d["id"], name.strip(),
+                                   ok_msg="Approved. Your files are ready.") is not None:
+                        st.balloons()
                 st.rerun()
             if state["unchecked_rows"]:
                 st.caption("Some guideline entries are still being checked by our doctor against the 2026 text; "
