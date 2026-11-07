@@ -16,7 +16,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 from evidex import pipeline  # noqa: E402
 from evidex.agents import steps  # noqa: E402
-from evidex.llm import OllamaLLM  # noqa: E402
+from evidex.llm import make_llm  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 ap = argparse.ArgumentParser()
@@ -26,7 +26,7 @@ ap.add_argument("--audience", default=steps.AUDIENCES[0])
 a = ap.parse_args()
 
 conn = psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
-for e in pipeline.run(conn, OllamaLLM(), a.request, a.artifact, a.audience):
+for e in pipeline.run(conn, make_llm(), a.request, a.artifact, a.audience):
     print(f"\n== {e['step']} [{e['status']}] {e['ms'] / 1000:.1f}s")
     d = e["data"]
     if e["step"] == "scope_guard":

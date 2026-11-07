@@ -18,6 +18,20 @@ from evidex.spine.vocab import OPERATORS, STATUSES
 
 load_dotenv()
 st.set_page_config(page_title="Evidex", page_icon="📚", layout="wide")
+try:  # Streamlit Cloud keeps settings in st.secrets; copy plain values into the environment
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, (str, int, float)) and _k not in os.environ:
+            os.environ[_k] = str(_v)
+except Exception:  # no secrets file when running locally
+    pass
+
+HOSTED = os.environ.get("LLM_PROVIDER", "ollama").lower() == "groq"
+MODEL_SHORT = ("a hosted model; usually under a minute" if HOSTED
+               else "a local model on this Mac; usually 1–6 minutes")
+MODEL_ABOUT = ("Runs on a **hosted open model (Qwen3.8-27B on Groq)**: your request and the spine rows are sent to it, "
+               "so enter general topics only, never patient details." if HOSTED else
+               "Runs on a **local model on the team's Mac** (no patient data, no external AI service).")
+
 
 BLOCKS = {
     ("2", "a"): "A · Diagnostic criteria",
@@ -624,8 +638,8 @@ STEP_NAMES = {"scope_guard": "Scope Guard", "spine_lookup": "Spine lookup", "pla
 
 @st.cache_resource
 def model():
-    from evidex.llm import OllamaLLM
-    return OllamaLLM()
+    from evidex.llm import make_llm
+    return make_llm()
 
 
 def _step_name(step: str) -> str:
@@ -693,6 +707,9 @@ def _current_job():
     job = jobs.get(job_id)
     if job is not None:
         st.session_state.job_id = job.id
+    elif job_id and not st.session_state.get("last_run"):
+        st.info("That draft run is no longer tracked here (the app was restarted). Drafts that finished "
+                "are saved: open the **Drafts** tab.")
     return job
 
 
@@ -703,7 +720,7 @@ def job_progress(job_id: str):
         return
     if job.done:
         st.rerun()  # whole page: show the result
-    with st.status(f"Working… {job.elapsed:.0f}s so far (a local model on this Mac; usually 1–6 minutes)",
+    with st.status(f"Working… {job.elapsed:.0f}s so far ({MODEL_SHORT})",
                    expanded=True, state="running"):
         st.caption("You can switch tabs, refresh or come back later: the draft keeps running and is saved "
                    "to the Drafts tab when it is ready.")
@@ -805,14 +822,14 @@ numbers are checked by code, and **nothing is exported until a doctor approves e
    under a run to see every prompt and output.
 
 #### Good to know
-- Runs on a **local model on the team's Mac** (no patient data, no external AI service). It handles
-  **one draft at a time**; if someone else is running one, you will be asked to wait a minute.
+- @@MODEL@@ It handles **one draft at a time**; if someone else is running one, you will be asked to
+  wait a minute.
 - Evidex reports what the guideline says; it **does not** give advice about individual patients.
 - Spine values were entered from long-standing ADA criteria; rows marked *"not yet checked"* are still
   being verified by the doctor against the 2026 text, and missing recommendation numbers or pages show as
   *TODO(doctor)*. Nothing is filled in by AI.
 - Synthetic content only. Drafts you create are visible in the *Drafts* tab to other evaluators.
-""")
+""".replace("@@MODEL@@", MODEL_ABOUT))
     st.caption("Team Synexis · AZYZ69 · source code: github.com/vigneshm2311-cyber/evidex")
 
 

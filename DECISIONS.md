@@ -43,3 +43,6 @@
 | 2026-11-07 | Drafts run in a background thread with an in-memory job registry; job id in the URL | A rerun or reconnect stopped in-page runs and lost minutes of work; no extra dependency (no queue server) for one local model |
 | 2026-11-07 | Wording faults (cut-off word, run-together words, repeated phrase) are Verifier issues and block approval until edited | Both the model and a doctor's edit produced such text and it passed as ✔; checks are narrow to avoid false flags (1/172 on eval claims, a true one) |
 | 2026-11-07 | Rows the Planner chose but no claim cites are a warning, not a block | The doctor decides whether the slides need them |
+| 2026-11-07 | Online version: Streamlit Community Cloud + Groq (`LLM_PROVIDER=groq`); local Ollama stays the default | Runs without the doctor's laptop, faster drafts; the doctor chose this route |
+| 2026-11-07 | Hosted model `qwen/qwen3.8-27b` (Qwen3-32B no longer offered on Groq); JSON mode with the schema in the prompt and checked in code | Same model family as the local qwen3:8b; Groq does not enforce our JSON schema for it |
+| 2026-11-07 | Local-model evaluation kept as `eval/REPORT_local_qwen3-8b.md`; `eval/REPORT.md` holds the hosted-model run | Each published number must match the model actually serving |

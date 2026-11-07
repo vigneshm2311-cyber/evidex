@@ -23,7 +23,7 @@ import psycopg  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
 from evidex import evaluate  # noqa: E402
-from evidex.llm import OllamaLLM  # noqa: E402
+from evidex.llm import make_llm  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 ap = argparse.ArgumentParser()
@@ -55,7 +55,7 @@ def connect():
 
 
 conn = connect()
-llm = OllamaLLM()
+llm = make_llm()
 started = datetime.now().strftime("%Y-%m-%d %H:%M")
 spine_rows, spine_checked = conn.execute(
     "select count(*), count(*) filter (where doctor_checked) from assertion where status = 'accepted'").fetchone()
