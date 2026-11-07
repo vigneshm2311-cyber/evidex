@@ -24,7 +24,7 @@ def app():
 def test_all_tabs_render_without_exceptions(app):
     app.run()
     assert not app.exception, app.exception
-    assert len(app.tabs) == 6
+    assert len(app.tabs) == 7      # Create, My drafts, Library (Encyclopedia, Graph, Review), How it works
     text = " ".join(m.value for m in app.markdown)
     assert "Diabetes mellitus is diagnosed by" in text
 

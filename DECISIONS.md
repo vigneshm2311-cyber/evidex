@@ -46,3 +46,9 @@
 | 2026-11-07 | Online version: Streamlit Community Cloud + Groq (`LLM_PROVIDER=groq`); local Ollama stays the default | Runs without the doctor's laptop, faster drafts; the doctor chose this route |
 | 2026-11-07 | Hosted model `qwen/qwen3.8-27b` (Qwen3-32B no longer offered on Groq); JSON mode with the schema in the prompt and checked in code | Same model family as the local qwen3:8b; Groq does not enforce our JSON schema for it |
 | 2026-11-07 | Local-model evaluation kept as `eval/REPORT_local_qwen3-8b.md`; `eval/REPORT.md` holds the hosted-model run | Each published number must match the model actually serving |
+| 2026-11-07 | Three-phase product (Request → Building → Draft) replaces the tab-first UI; old screens move to Library | Doctor's call: end-user language and time to value, not the app's internals |
+| 2026-11-07 | Literature layer: PubMed E-utilities (abstracts, no key) plus uploaded PDF/PPTX, stored in `source_doc`; cited as `pmid:<n>` / `up:<hash>` alongside spine IDs | Spine stays the grounding layer; sources add context; one claim model and one Verifier for both |
+| 2026-11-07 | Literature numbers must appear verbatim in the cited source text (code check); support judge sees the cited abstract or passage | Same "code decides numbers" rule as for the spine |
+| 2026-11-07 | Four personas (students, residents/CME, nurses/educators, patients/public) and four formats (slides, handout, flowchart, one-page PDF) | Doctor's spec; flowchart and one-pager are drawn by code from approved claims only |
+| 2026-11-07 | `pypdf` (read PDFs) and `fpdf2` (one-page PDF), DejaVu Sans bundled for Unicode symbols | Pure Python, small; approved by the doctor |
+| 2026-11-07 | Two approvals: the user confirms Evidex's understanding before anything is built, then approves the finished preview; claim-level review stays under "Detailed review" | Doctor's spec: outcome first, detail on request |

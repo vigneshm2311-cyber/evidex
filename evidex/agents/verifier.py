@@ -7,13 +7,15 @@ sources support it.
 """
 from __future__ import annotations
 
+from .. import sources as srcs
 from ..llm import LLM, LLMError, call_logged
 from ..spine import api
 from . import steps
 
 SUPPORT_SYSTEM = """You check claims written for a teaching document against their sources.
-The sources are entries from a guideline knowledge base. Judge ONLY against the sources given
-with each claim, not your own knowledge.
+The sources are entries from a guideline knowledge base and, for some claims, a published abstract
+or a passage from an uploaded paper. Judge ONLY against the sources given with each claim, not your
+own knowledge.
 
 For each claim answer:
 - "supported": everything the claim says is stated in its sources (rewording is fine).
@@ -44,18 +46,22 @@ def current_rows(conn, ids: list[str]) -> dict[str, dict]:
 
 
 def code_verify(conn, text: str, assertion_ids: list[str]) -> dict:
-    rows = current_rows(conn, assertion_ids)
+    """assertion_ids may mix spine row IDs with literature IDs (pmid:..., up:...)."""
+    spine_ids = [i for i in assertion_ids if not srcs.is_source_id(i)]
+    rows = current_rows(conn, spine_ids)
+    lit = srcs.load(conn, [i for i in assertion_ids if srcs.is_source_id(i)])
+    lit_rows = [srcs.as_row(lit[i], text) for i in assertion_ids if i in lit]
     issues = []
-    missing = [i for i in assertion_ids if i not in rows]
+    missing = [i for i in assertion_ids if i not in rows and i not in lit]
     if missing:
         issues.append("cited spine row(s) no longer exist: " + ", ".join(missing))
-    stale = [f"{i} is {rows[i]['status']}" for i in assertion_ids if i in rows and rows[i]["status"] != "accepted"]
+    stale = [f"{i} is {rows[i]['status']}" for i in spine_ids if i in rows and rows[i]["status"] != "accepted"]
     if stale:
         issues.append("cited spine row(s) not accepted: " + "; ".join(stale))
     if not assertion_ids:
         issues.append("cites no spine row")
-    cited = [rows[i] for i in assertion_ids if i in rows]
-    res = steps.check_text(text, cited)
+    cited = [rows[i] for i in spine_ids if i in rows]
+    res = steps.check_text(text, cited, lit_rows)
     issues += res["issues"]
     return {
         "number_checks": res["number_checks"],
@@ -63,8 +69,11 @@ def code_verify(conn, text: str, assertion_ids: list[str]) -> dict:
         "grades": [a["grade"] or "TODO(doctor)" for a in cited],
         "anchors": [{"assertion_id": a["id"], "anchor": api.anchor_text(a),
                      "statement": api.statement(a), "condition_text": a["condition_text"],
-                     "doctor_checked": a["doctor_checked"], "status": a["status"]} for a in cited],
-        "_rows": cited,
+                     "doctor_checked": a["doctor_checked"], "status": a["status"]} for a in cited]
+                   + [{"assertion_id": d["id"], "anchor": d["citation"], "statement": d["title"],
+                       "condition_text": None, "doctor_checked": True, "status": "accepted",
+                       "kind": d["kind"], "url": d["url"]} for d in lit_rows],
+        "_rows": cited + lit_rows,
     }
 
 
@@ -113,8 +122,9 @@ def verify_texts(conn, llm: LLM, claims: list[dict], *, run_id: str, log_conn=No
 
 
 def verify_section(conn, llm: LLM, heading: str, audience: str, claims: list[dict],
-                   by_id: dict[str, dict], *, run_id: str, log_conn=None) -> list[dict]:
-    """Verify a section's claims; rewrite each failing claim once; return final claims."""
+                   by_id: dict[str, dict], *, run_id: str, log_conn=None, rewrite=None) -> list[dict]:
+    """Verify a section's claims; rewrite each failing claim once; return final claims.
+    rewrite(rows, feedback) -> claims; defaults to the spine-only Synthesizer."""
     verdicts = verify_texts(conn, llm, claims, run_id=run_id, log_conn=log_conn,
                             step=f"verifier:{heading}")
     out = []
@@ -124,9 +134,10 @@ def verify_section(conn, llm: LLM, heading: str, audience: str, claims: list[dic
         if not v["ok"]:
             rows = [by_id[i] for i in c["assertion_ids"] if i in by_id]
             try:
-                redo = steps.synthesizer(llm, heading, audience, rows, run_id=run_id,
-                                         log_conn=log_conn, feedback=f"Claim: {c['text']}\nProblems: "
-                                         + "; ".join(v["issues"]))
+                feedback = f"Claim: {c['text']}\nProblems: " + "; ".join(v["issues"])
+                redo = (rewrite(rows, feedback) if rewrite else
+                        steps.synthesizer(llm, heading, audience, rows, run_id=run_id,
+                                          log_conn=log_conn, feedback=feedback))
             except LLMError:
                 redo = []
             if redo:

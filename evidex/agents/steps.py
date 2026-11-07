@@ -14,13 +14,26 @@ from ..spine import api
 ARTIFACTS = {
     "slides": "teaching slide deck (4-6 content slides)",
     "handout": "teaching handout (3-5 short sections)",
+    "flowchart": "stepwise flowchart (3-6 ordered steps, at most 3 short statements per step)",
+    "onepager": "one-page quick-reference summary (3-4 short sections, at most 12 statements in all)",
 }
 AUDIENCES = [
     "Medical students",
-    "Junior doctors and residents",
-    "General practitioners",
+    "Residents and doctors (CME)",
     "Nurses and diabetes educators",
+    "Patients and public",
 ]
+# How each persona is written for (docs/PRODUCT_RULES.md). Older drafts may carry other audience names.
+PERSONA_STYLE = {
+    "Medical students": "clear and exam-oriented: criteria, thresholds and classic distinctions, numbers always with units",
+    "Residents and doctors (CME)": "concise and clinical: newest evidence first; for a study, say what kind of study it was "
+                                   "and its size when the source gives them",
+    "Nurses and diabetes educators": "practical: what to check, when, and what a result means in general; short sentences",
+    "Patients and public": "plain language (about grade 8), warm and simple: explain every number and term; general "
+                           "education only, never what a particular person should do, never drug doses",
+}
+PATIENT_PERSONA = "Patients and public"
+PATIENT_NOTE = "General information, not advice for any individual. Talk to your doctor."
 
 # ---------------- 1. Scope Guard ----------------
 
@@ -87,13 +100,22 @@ def _general_query_problems(general: str, request: str) -> list[str]:
     return problems
 
 
-def scope_guard(llm: LLM, request: str, *, run_id: str, log_conn=None) -> dict:
+# The three-phase flow: the doctor may attach papers or decks and refer to them.
+STUDIO_SCOPE_SYSTEM = SCOPE_SYSTEM.replace(
+    "Examples:",
+    "The doctor may attach published papers or teaching decks and refer to them (\"this paper\",\n"
+    "\"my slides\"). Summarising, teaching from or updating that material is in scope, as long as\n"
+    "it is not about a specific patient.\n\nExamples:\n"
+    "- \"One-page summary of this paper for nurses\" -> in_scope_topic (attached paper)", 1)
+
+
+def scope_guard(llm: LLM, request: str, *, run_id: str, log_conn=None, system: str = SCOPE_SYSTEM) -> dict:
     def check(out):
         # Only the suggested general question is checked here; the label is checked below.
         return _general_query_problems(out["general_query"], request)
 
     try:
-        out = call_logged(llm, SCOPE_SYSTEM, f"Request:\n{request}", SCOPE_SCHEMA,
+        out = call_logged(llm, system, f"Request:\n{request}", SCOPE_SCHEMA,
                           step="scope_guard", run_id=run_id, validate=check, log_conn=log_conn)
         general = out["general_query"].strip()
     except LLMError as e:
@@ -150,6 +172,8 @@ PLANNER_SCHEMA = {
 
 
 def assertion_line(a: dict) -> str:
+    if a.get("kind") in ("pubmed", "upload"):  # a literature source (evidex.sources.as_row)
+        return f"{a['id']} | {a['title']} | {a.get('passage') or a['body'][:1800]}"
     line = f"{a['id']} | {api.statement(a)}"
     if a.get("condition_text"):
         line += f" | {a['condition_text']}"
@@ -315,7 +339,7 @@ def _unit(u: str | None) -> str:
     return u
 
 
-def check_text(text: str, cited: list[dict]) -> dict:
+def check_text(text: str, cited: list[dict], sources: list[dict] = ()) -> dict:
     """Code checks on a claim's text against the spine rows it cites.
 
     Numbers are read from the text itself (not from what the model says it used), so the
@@ -330,6 +354,11 @@ def check_text(text: str, cited: list[dict]) -> dict:
                 values.setdefault(Decimal(v), []).append(a)
         allowed |= numbers_in(" ".join(filter(None, [api.statement(a), a.get("condition_text") or ""])))
     allowed |= set(values)
+    # Literature: a number is supported if it appears in the cited source's own text.
+    src_nums: dict[Decimal, str] = {}
+    for s in sources:
+        for n in numbers_in(s.get("body") or ""):
+            src_nums.setdefault(n, s["id"])
 
     units_after = {Decimal(n): u for n, u in NUM_UNIT_RE.findall(text or "")}
     number_checks = []
@@ -341,12 +370,18 @@ def check_text(text: str, cited: list[dict]) -> dict:
             if same_unit:
                 number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": True,
                                       "assertion_id": same_unit[0]["id"], "why": ""})
+            elif n in src_nums:
+                number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": True,
+                                      "assertion_id": src_nums[n], "why": ""})
             else:
                 a = rows[0]
                 number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": False,
                                       "assertion_id": a["id"],
                                       "why": f"says {format(n, 'f')} {unit}; spine says "
                                              f"{api.format_value(a)} ({a['id']})"})
+        elif n in src_nums:
+            number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": True,
+                                  "assertion_id": src_nums[n], "why": ""})
         elif n in allowed:
             continue  # part of a name or qualifier, e.g. "75-g OGTT", "at least 8 h"
         else:
@@ -355,30 +390,32 @@ def check_text(text: str, cited: list[dict]) -> dict:
                     and (unit is None or _unit(unit) == _unit(a["unit"]))]
             a = near[0] if near else None
             why = (f"says {format(n, 'f')} {unit or ''}".rstrip() + f"; spine says {api.format_value(a)} ({a['id']})"
-                   if a else f"{format(n, 'f')} is not in the cited spine rows")
+                   if a else f"{format(n, 'f')} is not in the cited sources" if sources
+                   else f"{format(n, 'f')} is not in the cited spine rows")
             number_checks.append({"value": format(n, "f"), "unit": unit or "", "ok": False,
                                   "assertion_id": a["id"] if a else None, "why": why,
                                   "range": bool(a and a["operator"] == "range")})
     stray = [c["value"] for c in number_checks if not c["ok"] and c["value"] and _d(c["value"]) not in allowed]
     if stray:
-        issues.append("number(s) not in the cited spine rows: " + ", ".join(stray))
+        issues.append(("number(s) not in the cited sources: " if sources else "number(s) not in the cited spine rows: ")
+                      + ", ".join(stray))
     issues += [c["why"] for c in number_checks if not c["ok"]]
     if PATIENT_WORDING.search(text or ""):
         issues.append("patient-directed wording")
-    issues += wording_issues(text or "", cited)
+    issues += wording_issues(text or "", cited, " ".join(s.get("body") or "" for s in sources))
     return {"number_checks": number_checks, "issues": issues}
 
 
 GLUE_OK = {"mmHg", "HbA1c", "eGFR"}
 
 
-def wording_issues(text: str, cited: list[dict]) -> list[str]:
+def wording_issues(text: str, cited: list[dict], extra_source: str = "") -> list[str]:
     """Typing faults a reader would see on a slide: a word cut off ('Diabetes mell, is'), words run
     together ('200 mDiabetes', 'mg/dL.g/dL') or a phrase repeated (a botched paste)."""
     out = []
     source = " ".join(" ".join(filter(None, [api.statement(a), a.get("condition_text") or "",
                                              a.get("subject_name") or "", a.get("object_name") or ""]))
-                      for a in cited).lower()
+                      for a in cited).lower() + " " + extra_source.lower()
     src_words = set(re.findall(r"[a-z][a-z0-9-]*", source))
     cut = sorted({w for w in re.findall(r"\b([A-Za-z]{3,})[,;:]", text)
                   if w.lower() not in src_words

@@ -4,6 +4,7 @@ toolbarMode = "viewer"      # hide developer menu and Deploy button on the publi
 [server]
 headless = true
 runOnSave = false
+maxUploadSize = 15          # MB per file (docs/PRODUCT_RULES.md)
 
 [browser]
 gatherUsageStats = false
