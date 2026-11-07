@@ -137,7 +137,7 @@ def test_topic_outside_spine_is_not_found_without_planner(conn):
 
 def test_planner_returning_nothing_is_not_found(conn):
     llm = FakeLLM(plan={"title": "x", "sections": [], "not_covered": ["smartphone apps"]})
-    ev = run(conn, llm, "Smartphone apps for diagnosing diabetes")
+    ev = run(conn, llm, "Smartphone apps that read A1C")
     assert ev[-1]["step"] == "planner" and ev[-1]["status"] == "not_found"
     assert ev[-1]["data"]["not_covered"] == ["smartphone apps"]
 
@@ -228,9 +228,9 @@ def test_model_failure_is_reported_not_guessed(conn):
 
 
 def test_planner_padding_is_replaced_by_not_found(conn):
-    padded = {"title": "Apps", "not_covered": ["Smartphone apps for diagnosing diabetes", "app stores"],
+    padded = {"title": "Apps", "not_covered": ["Smartphone apps that read A1C", "app stores"],
               "sections": [{"heading": "Background", "assertion_ids": ["dx-a1c"]}]}
-    ev = run(conn, FakeLLM(plan=padded), "Smartphone apps for diagnosing diabetes")
+    ev = run(conn, FakeLLM(plan=padded), "Smartphone apps that read A1C")
     assert (ev[-1]["step"], ev[-1]["status"]) == ("planner", "not_found")
     assert ev[-1]["data"]["main_subject_missing"]
 
@@ -299,3 +299,33 @@ def test_full_outline_with_a_noted_gap_is_kept(conn):
                          {"heading": "Caveats", "assertion_ids": ["a1c-sickle"]}]}
     ev = run(conn, FakeLLM(plan=plan, claims=GOOD_CLAIMS), "Diagnosing diabetes in Indian adults")
     assert ev[-1]["step"] == "done"
+
+
+# ---- off-topic requests are stopped by code before any model call ----
+
+@pytest.mark.parametrize("topic, why", [
+    ("SGLT2 inhibitors for heart failure in people with diabetes", "glucose-lowering or cardiovascular drugs"),
+    ("Management of diabetic foot ulcers", "diabetes complications"),
+    ("Diet plans for South Indian people with diabetes", "nutrition plans"),
+])
+def test_off_topic_rules(conn, topic, why):
+    assert why in pipeline.out_of_spine(topic)
+    ev = run(conn, FakeLLM(plan=GOOD_PLAN, claims=GOOD_CLAIMS), topic)
+    assert (ev[-1]["step"], ev[-1]["status"]) == ("spine_lookup", "not_found")
+
+
+def test_topic_with_no_spine_words_is_not_found(conn):
+    assert pipeline.unknown_topic(conn, "Tuberculosis and diabetes") == ["tuberculosis"]
+    assert pipeline.unknown_topic(conn, "Diagnosing heart failure") == ["heart", "failure"]
+    assert pipeline.unknown_topic(conn, "Teaching slides on diabetes for nurses") == []   # nothing specific asked
+    assert pipeline.unknown_topic(conn, "HbA1c and sickle cell trait") == []
+    ev = run(conn, FakeLLM(plan=GOOD_PLAN, claims=GOOD_CLAIMS), "Tuberculosis and diabetes")
+    assert ev[-1]["status"] == "not_found" and "tuberculosis" in ev[-1]["data"]["not_covered"][0]
+
+
+def test_tidy_changes_typography_only():
+    names = {"Glycated haemoglobin (A1C)", "Asian American adults", "Prediabetes"}
+    assert steps.tidy("Prediabetes is diagnosed when Glycated haemoglobin (A1C) is 5.7 to 6.4 %.", names) == \
+        "Prediabetes is diagnosed when glycated haemoglobin (A1C) is 5.7 to 6.4%."
+    assert steps.tidy("Screen Asian American adults at a BMI of 23 kg/m2.", names) == \
+        "Screen Asian American adults at a BMI of 23 kg/m2."

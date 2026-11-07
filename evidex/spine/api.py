@@ -100,6 +100,18 @@ def anchor_text(a: dict) -> str:
 
 # ---------- reads ----------
 
+def vocabulary(conn) -> set[str]:
+    """Every word used in concept names, synonyms and assertion conditions."""
+    import re
+    words: set[str] = set()
+    for name, syn in conn.execute("select name, synonyms from concept"):
+        for t in [name, *syn]:
+            words |= set(re.findall(r"[a-z][a-z0-9-]*", t.lower()))
+    for (t,) in conn.execute("select coalesce(condition_text, '') from assertion where status = 'accepted'"):
+        words |= set(re.findall(r"[a-z][a-z0-9-]*", t.lower()))
+    return words
+
+
 def all_concepts(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute("select id, type, name, synonyms, notes from concept order by type, name")

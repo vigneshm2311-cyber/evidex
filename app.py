@@ -38,16 +38,36 @@ TYPE_COLOUR = {
 
 # ---------- data ----------
 
+PING_EVERY_S = 30
+
+
 @st.cache_resource
 def _connection():
-    return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True)
+    # Keepalives and a TCP user timeout make a connection that died with the network
+    # fail within seconds instead of hanging every page until the OS gives up.
+    return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True, connect_timeout=10,
+                           keepalives=1, keepalives_idle=20, keepalives_interval=5,
+                           keepalives_count=3, tcp_user_timeout=15000)
 
 
 def conn():
+    import time
     c = _connection()
+    stale = time.monotonic() - getattr(c, "_evidex_ping", 0) > PING_EVERY_S
+    if not (c.closed or c.broken) and stale:
+        try:
+            c.execute("select 1")
+            c._evidex_ping = time.monotonic()
+        except psycopg.Error:
+            pass
     if c.closed or c.broken:
+        try:
+            c.close()
+        except Exception:
+            pass
         _connection.clear()
         c = _connection()
+        c._evidex_ping = time.monotonic()
     return c
 
 
@@ -71,6 +91,15 @@ def block_of(a: dict) -> tuple[str, str]:
 
 # ---------- access ----------
 
+def _session_token(code: str) -> str:
+    """Kept in the URL so a page refresh does not log an evaluator out. Keyed with a server
+    secret, so the access code cannot be worked out from it."""
+    import hashlib
+    import hmac
+    secret = os.environ.get("SESSION_SECRET") or os.environ.get("DOCTOR_CODE") or code
+    return hmac.new(secret.encode(), b"evaluator:" + code.encode(), hashlib.sha256).hexdigest()[:24]
+
+
 def gate():
     """ACCESS_CODE: evaluators (everything except editing the spine).
     DOCTOR_CODE: the doctor (can also edit the spine). Without codes set: local doctor mode."""
@@ -80,16 +109,25 @@ def gate():
     if not code and not doctor:
         st.session_state.update(authorised=True, role="doctor")
         return
+    if code and st.query_params.get("s") == _session_token(code):
+        st.session_state.update(authorised=True, role="evaluator")
+        return
     st.title("Evidex")
     st.caption("Doctor productivity and knowledge assistant · Health-a-thon 2026 · Team Synexis (AZYZ69)")
-    entered = st.text_input("Access code", type="password")
-    if entered:
+    st.markdown("Drafts **teaching slides and handouts** on diabetes diagnosis, classification, screening and "
+                "prevention from a doctor-curated knowledge base anchored to the *ADA Standards of Care 2026*. "
+                "Every claim is cited and checked, and nothing is exported until a doctor signs off.")
+    with st.form("login"):
+        entered = st.text_input("Access code", type="password", help="Given in the submission form.")
+        submitted = st.form_submit_button("Enter", type="primary")
+    if submitted and entered:
         entered = entered.strip()
         if doctor and entered == doctor:
             st.session_state.update(authorised=True, role="doctor")
             st.rerun()
         if code and entered == code:
             st.session_state.update(authorised=True, role="evaluator")
+            st.query_params["s"] = _session_token(code)
             st.rerun()
         st.error("That code is not right.")
     st.stop()
@@ -251,7 +289,8 @@ def encyclopedia(concepts, assertions):
     cid = mid.selectbox(
         f"Concept ({len(matches)} found)", [c["id"] for c in matches], index=idx,
         format_func=lambda i: f"{by_id[i]['name']}  ·  {by_id[i]['type']} · {counts.get(i, 0)} statements")
-    st.query_params["concept"] = cid
+    if cid != default:
+        st.query_params["concept"] = cid
     with st.container():
         c = by_id[cid]
         st.subheader(c["name"])
@@ -321,6 +360,11 @@ def graph(concepts, assertions):
 
 
 def review(concepts, assertions):
+    if not is_doctor():
+        st.info("**How the spine is being verified.** Every row was entered from the ADA Standards of Care "
+                "(Sections 2–3). The doctor is now checking each one against the 2026 text and adding its "
+                "recommendation number and page. Until a row is checked, drafts and exported files say "
+                "*not yet checked by the doctor*. Nothing here is filled in by AI.")
     total = len(assertions)
     checked = sum(a["doctor_checked"] for a in assertions)
     anchored = sum(bool(a["locator"]) for a in assertions)
@@ -388,24 +432,29 @@ def claim_card(c: dict, locked: bool, ctx: str):
             top += "  ·  edited by doctor"
         st.markdown(top)
 
-        if locked or c["status"] == "rejected":
+        editing = (not locked and c["status"] != "rejected"
+                   and st.session_state.get(f"edit-{key}", False))
+        if not editing:
             st.markdown(("~~" + c["text"] + "~~") if c["status"] == "rejected" else c["text"])
         else:
-            new_text = st.text_area("Claim", c["text"], key=f"txt-{key}", height=80, label_visibility="collapsed")
-            if new_text.strip() != c["text"]:
-                if st.button("Save edit and re-verify", key=f"save-{key}", type="primary"):
-                    lock = model_lock()
-                    if not lock.acquire(timeout=20):
-                        st.session_state.flash_error = ("The model is busy with another draft; "
-                                                        "try saving again in a minute.")
-                    else:
-                        try:
-                            with st.spinner("Re-verifying…"):
-                                _act(drafts.edit, conn(), model(), c["id"], _who(), new_text,
-                                     ok_msg="Edit saved and re-verified")
-                        finally:
-                            lock.release()
-                    st.rerun()
+            with st.form(f"editform-{key}", border=False):
+                new_text = st.text_area("Claim", c["text"], key=f"txt-{key}", height=80,
+                                        label_visibility="collapsed")
+                save = st.form_submit_button("Save edit and re-verify", type="primary")
+            if save and new_text.strip() != c["text"]:
+                st.session_state[f"edit-{key}"] = False
+                lock = model_lock()
+                if not lock.acquire(timeout=20):
+                    st.session_state.flash_error = ("The model is busy with another draft; "
+                                                    "try saving again in a minute.")
+                else:
+                    try:
+                        with st.spinner("Re-verifying…"):
+                            _act(drafts.edit, conn(), model(), c["id"], _who(), new_text,
+                                 ok_msg="Edit saved and re-verified")
+                    finally:
+                        lock.release()
+                st.rerun()
         if c["original_text"] != c["text"]:
             st.caption(f"Original draft: {c['original_text']}")
 
@@ -439,7 +488,8 @@ def claim_card(c: dict, locked: bool, ctx: str):
                            + ("✔ checked against 2026 text" if an["doctor_checked"] else "○ not yet checked by doctor"))
 
         if not locked:
-            b1, b2, b3, b4 = st.columns([1.3, 1, 1, 1])
+            b1, b2, b3, b4, b5 = st.columns([1.3, 1.25, 1.1, 1, 0.9])
+            b5.toggle("Edit", key=f"edit-{key}", disabled=c["status"] == "rejected")
             ticked = b1.checkbox("Numbers checked", c["numbers_checked"], key=f"num-{key}",
                                  disabled=not nums) if nums else False
             if b2.button("Approve", key=f"ok-{key}", disabled=c["status"] == "approved"):
@@ -462,16 +512,33 @@ def review_draft(draft_id: str, ctx: str):
     st.subheader(d["title"])
     st.caption(f"{d['artifact']} · {d['audience']} · request: “{d['request']}” · draft `{d['id']}`")
     state = drafts.signoff_state(d)
-    flagged = sum(not c["verdict"].get("ok") for c in d["claims"])
+    flagged = sum(not c["verdict"].get("ok") and c["status"] != "rejected" for c in d["claims"])
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Approved", state["approved"])
     m2.metric("Rejected", state["rejected"])
     m3.metric("To review", state["pending"])
-    m4.metric("Flagged by Verifier", flagged)
+    m4.metric("Flagged (open)", flagged)
     if locked:
         st.success(f"Signed off by **{d['signed_by']}** on {d['signed_at'].astimezone():%d %b %Y %H:%M}. Locked.")
     elif not _who():
         st.info("Enter your name in the sidebar to review; every decision is logged with it.")
+    if not locked:
+        ready = [c for c in d["claims"] if c["status"] == "pending" and c["verdict"].get("ok")]
+        if len(ready) > 1:
+            with st.container(border=True):
+                a1, a2 = st.columns([3, 1.3])
+                sure = a1.checkbox(f"I have read the {len(ready)} Verifier-passed claims still to review "
+                                   "and checked their numbers against the sources", key=f"allnum-{ctx}-{d['id']}")
+                if a2.button(f"Approve all {len(ready)}", disabled=not sure, key=f"allok-{ctx}-{d['id']}"):
+                    done = 0
+                    for c in ready:
+                        if _act(drafts.decide, conn(), c["id"], _who(), "approved", numbers_checked=True) is None:
+                            break
+                        done += 1
+                    if done:
+                        st.session_state.flash = f"Approved {done} claim(s)"
+                    st.rerun()
+                a1.caption("Or approve one by one below. Claims flagged by the Verifier must be fixed or rejected.")
 
     for s in d["sections"]:
         st.markdown(f"#### {s['heading']}")
@@ -481,8 +548,13 @@ def review_draft(draft_id: str, ctx: str):
     st.divider()
     st.markdown("### Sign-off")
     if state["unchecked_rows"]:
-        st.warning(f"{len(state['unchecked_rows'])} spine row(s) behind approved claims are not yet checked "
-                   "against your 2026 copy: " + ", ".join(f"`{x}`" for x in state["unchecked_rows"]))
+        rows_txt = ", ".join(f"`{x}`" for x in state["unchecked_rows"])
+        if is_doctor():
+            st.warning(f"{len(state['unchecked_rows'])} spine row(s) behind approved claims are not yet checked "
+                       f"against your 2026 copy: {rows_txt}")
+        else:
+            st.info(f"{len(state['unchecked_rows'])} spine row(s) behind these claims are still pending the "
+                    f"doctor's check against the ADA 2026 text ({rows_txt}). The exported file says so.")
     if locked:
         st.markdown("### Export")
         st.caption("The file contains exactly the approved claim text, numbered references to the "
@@ -551,19 +623,24 @@ def _step_name(step: str) -> str:
     return STEP_NAMES.get(step, step)
 
 
-def _set_topic(t: str):
+def _set_topic(t: str, reset: bool = False):
     st.session_state.topic = t
+    if reset:
+        st.session_state.last_run = None
 
 
 def render_run(events: list[dict]):
     last = events[-1]
     d = last["data"]
+    st.caption("Steps: " + " → ".join(f"{_step_name(e['step'])} ({e['ms'] / 1000:.0f}s)"
+                                      for e in events if e["step"] != "done")
+               + f" · total {sum(e['ms'] for e in events) / 1000:.0f}s")
     if last["status"] == "declined":
         st.error(f"**Declined by the Scope Guard** ({d['decided_by']}). {d['reason']}\n\n"
                  "Evidex reports what guidelines say in general; it does not advise on individual patients.")
         if d.get("general_query"):
             st.button(f"Ask the general question instead: “{d['general_query']}”",
-                      on_click=_set_topic, args=(d["general_query"],))
+                      on_click=_set_topic, args=(d["general_query"], True))
     elif last["status"] == "not_found":
         st.warning(f"**{d['message']}.** The spine (ADA 2026 Sections 2–3) does not cover this topic, "
                    "so Evidex will not write about it.")
@@ -601,18 +678,25 @@ def render_run(events: list[dict]):
 
 def create(concepts, assertions):
     st.session_state.spine_rows = assertions
-    st.markdown("### What are you creating?")
-    c1, c2 = st.columns(2)
-    artifact = c1.radio("Output", list(steps.ARTIFACTS), horizontal=True,
-                        format_func=lambda k: {"slides": "Teaching slides", "handout": "Teaching handout"}[k])
-    audience = c2.selectbox("Audience", steps.AUDIENCES)
-    st.text_area("Topic", key="topic", height=70,
-                 placeholder="e.g. Diagnosing diabetes in Indian adults")
-    st.selectbox("…or pick a demo example", [""] + EXAMPLES, key="example",
-                 on_change=lambda: _set_topic(st.session_state.example),
-                 format_func=lambda x: x or "—")
+    has_run = bool(st.session_state.get("last_run"))
+    with st.expander("✍️ Start another draft" if has_run else "✍️ What are you creating?", expanded=not has_run):
+        st.selectbox("Pick a demo example (optional)", [""] + EXAMPLES, key="example",
+                     on_change=lambda: _set_topic(st.session_state.example),
+                     format_func=lambda x: x or "—")
+        with st.form("create_form", border=False):
+            c1, c2 = st.columns(2)
+            artifact = c1.radio("Output", list(steps.ARTIFACTS), horizontal=True,
+                                format_func=lambda k: {"slides": "Teaching slides", "handout": "Teaching handout"}[k])
+            audience = c2.selectbox("Audience", steps.AUDIENCES)
+            st.text_area("Topic", key="topic", height=70,
+                         placeholder="e.g. Diagnosing diabetes in Indian adults")
+            st.caption("Covers ADA 2026 Sections 2–3: diagnosis, classification, screening and prevention. "
+                       "General teaching topics only: no individual patients, doses or treatment plans.")
+            submitted = st.form_submit_button("Create draft", type="primary")
     topic = (st.session_state.get("topic") or "").strip()
-    if st.button("Create draft", type="primary", disabled=not topic):
+    if submitted and not topic:
+        st.warning("Type a topic or pick a demo example first.")
+    if submitted and topic:
         import time as _t
         limit = run_allowed()
         lock = model_lock()
@@ -638,6 +722,7 @@ def create(concepts, assertions):
                 st.session_state.last_run = events
             finally:
                 lock.release()
+            st.rerun()  # redraw with the input panel collapsed so the result sits at the top
     if st.session_state.get("last_run"):
         render_run(st.session_state.last_run)
 
@@ -656,7 +741,8 @@ numbers are checked by code, and **nothing is exported until a doctor approves e
 **Context → Evidence → Artifact → Verify → Approve**
 
 #### Try it (about 10 minutes)
-1. **Enter your name** in the sidebar. Every review action is logged with it.
+1. **Enter your name** in the sidebar (on a phone, tap **›** at the top left to open it). Every review
+   action is logged with it.
 2. **A patient-specific question is declined.** In *Create*, pick the demo example
    *"What metformin dose should I start for my 54-year-old patient…"* and click **Create draft**
    (~5 s). Evidex declines and offers a general question instead.
@@ -666,9 +752,10 @@ numbers are checked by code, and **nothing is exported until a doctor approves e
    *"Diagnosing diabetes in Indian adults"* (~3 min). Watch each step: Scope Guard, spine lookup,
    Planner, Synthesizer, Verifier.
 5. **Review.** For each claim, open **Source** to see the spine row and its ADA anchor.
-   **Edit a number** (e.g. change 5.7 to 6.0) and click *Save edit and re-verify*: the Verifier flags it
+   Switch on **Edit** for a claim, **change a number** (e.g. 5.7 to 6.0) and click *Save edit and re-verify*: the Verifier flags it
    ("spine says 5.7–6.4 %") and approval is blocked. Reject it or change it back.
-6. **Sign off and export.** Approve the remaining claims (tick *Numbers checked*), click **Sign off**,
+6. **Sign off and export.** Approve the remaining claims (one by one with *Numbers checked*, or with
+   **Approve all** after confirming you checked them), click **Sign off**,
    then download the **PPTX** or **DOCX**. The file contains exactly the approved text, numbered
    references and an AI-use note.
 7. Optional: browse the spine in **Encyclopedia** and **Graph**; open *"What each agent saw and returned"*
@@ -701,7 +788,7 @@ with st.sidebar:
     st.caption(f"{len(concepts)} concepts · {len(assertions)} statements")
     st.caption("The spine reports what the guideline says and where. It does not give advice "
                "about any individual patient.")
-    if st.button("Reload from database"):
+    if is_doctor() and st.button("Reload from database"):
         load.clear()
         export_files.clear()
         st.rerun()
@@ -713,7 +800,7 @@ if err := st.session_state.pop("flash_error", None):
     st.error(err)
 
 tabi, tab0, tabd, tab1, tab2, tab3 = st.tabs(["ℹ️ How to test", "✍️ Create", "📝 Drafts", "📚 Encyclopedia",
-                                              "🕸️ Graph", "✅ Spine review"])
+                                              "🕸️ Graph", "✅ Spine review" if is_doctor() else "✅ Verification"])
 with tabi:
     about_page()
 with tab0:

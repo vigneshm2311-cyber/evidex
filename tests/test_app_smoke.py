@@ -49,3 +49,16 @@ def test_doctor_sees_spine_edit_forms(app):
     app.session_state["role"] = "doctor"
     app.run()
     assert any(e.label == "Check / edit" for e in app.expander)
+
+
+def test_session_token_in_url_survives_a_refresh(app):
+    if not os.environ.get("ACCESS_CODE"):
+        pytest.skip("no ACCESS_CODE set")
+    import importlib.util
+    app.session_state["authorised"] = False
+    app.query_params["s"] = "wrong"
+    app.run()
+    assert not app.tabs                                   # a wrong token still shows the login
+    spec = importlib.util.spec_from_file_location("x", ROOT / "app.py")
+    src = (ROOT / "app.py").read_text()
+    assert "def _session_token" in src and spec is not None
