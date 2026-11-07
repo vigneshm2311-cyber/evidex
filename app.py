@@ -133,9 +133,10 @@ def gate():
         return
     st.title("Evidex")
     st.caption("Doctor productivity and knowledge assistant · Health-a-thon 2026 · Team Synexis (AZYZ69)")
-    st.markdown("Drafts **teaching slides and handouts** on diabetes diagnosis, classification, screening and "
-                "prevention from a doctor-curated knowledge base anchored to the *ADA Standards of Care 2026*. "
-                "Every claim is cited and checked, and nothing is exported until a doctor signs off.")
+    st.markdown("Make **slides, handouts, flowcharts and one-page summaries** on diabetes diagnosis, classification, "
+                "screening and prevention, from a sentence or your own papers. Grounded in a doctor-curated knowledge "
+                "base built from the *ADA Standards of Care 2026* and recent PubMed research; every number is checked "
+                "against its source, and nothing is downloaded until you approve it.")
     with st.form("login"):
         entered = st.text_input("Access code", type="password", help="Given in the submission form.")
         submitted = st.form_submit_button("Enter", type="primary")
