@@ -28,3 +28,5 @@
 - Verifier wording checks in code: cut-off words, words run together, repeated 7-word phrases. On the 172 evaluation claims: 1 flag, the real "Diabetes mell," in q02 that had passed before.
 - Planned-but-unused spine rows are stored with the draft (migration 005, `draft.unused_rows`) and shown to the reviewer under each section.
 - `scripts/ask.py` fixed for the current claim format. 98 tests passing.
+- Hosted option for an online version: `LLM_PROVIDER=groq` (Qwen3.8-27B on Groq; Qwen3-32B is no longer offered), replies checked against each step's JSON schema in code, rate limits waited out; Streamlit secrets read at start-up; `docs/DEPLOY.md`.
+- Evaluation rerun on the hosted model (`eval/REPORT.md`; local results kept in `eval/REPORT_local_qwen3-8b.md`): 16 drafts / 126 claims, citation and number accuracy 100%, wrong numbers caught 40/40 by code and 40/40 by the AI judge, patient-specific declined 7/7, false refusals 1/23, "Not found" 22/22, must-cite recall 96.9%, median 2.0 min per draft (free-tier rate limits). Measured cost ≈ $0.008 per draft (max $0.016) at Groq's listed $0.80 / $4.00 per million tokens.
