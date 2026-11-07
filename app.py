@@ -11,7 +11,7 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
-from evidex import drafts, export, pipeline
+from evidex import drafts, export, jobs, pipeline
 from evidex.agents import steps
 from evidex.spine import api
 from evidex.spine.vocab import OPERATORS, STATUSES
@@ -41,13 +41,17 @@ TYPE_COLOUR = {
 PING_EVERY_S = 30
 
 
-@st.cache_resource
-def _connection():
+def fresh_connection():
     # Keepalives and a TCP user timeout make a connection that died with the network
     # fail within seconds instead of hanging every page until the OS gives up.
     return psycopg.connect(os.environ["DATABASE_URL"], autocommit=True, connect_timeout=10,
                            keepalives=1, keepalives_idle=20, keepalives_interval=5,
                            keepalives_count=3, tcp_user_timeout=15000)
+
+
+@st.cache_resource
+def _connection():
+    return fresh_connection()
 
 
 def conn():
@@ -488,7 +492,7 @@ def claim_card(c: dict, locked: bool, ctx: str):
                            + ("✔ checked against 2026 text" if an["doctor_checked"] else "○ not yet checked by doctor"))
 
         if not locked:
-            b1, b2, b3, b4, b5 = st.columns([1.3, 1.25, 1.1, 1, 0.9])
+            b1, b2, b3, b4, b5 = st.columns([1.25, 1.15, 1.05, 0.95, 1.15])
             b5.toggle("Edit", key=f"edit-{key}", disabled=c["status"] == "rejected")
             ticked = b1.checkbox("Numbers checked", c["numbers_checked"], key=f"num-{key}",
                                  disabled=not nums) if nums else False
@@ -540,10 +544,17 @@ def review_draft(draft_id: str, ctx: str):
                     st.rerun()
                 a1.caption("Or approve one by one below. Claims flagged by the Verifier must be fixed or rejected.")
 
+    unused = d.get("unused_rows") or {}
+    by_id = {a["id"]: a for a in load()[1]}
     for s in d["sections"]:
         st.markdown(f"#### {s['heading']}")
         for c in s["claims"]:
             claim_card(c, locked, ctx)
+        left_out = [by_id[i] for i in unused.get(s["heading"], []) if i in by_id]
+        if left_out and not locked:
+            st.warning("**Planned for this section but not in any claim.** Check whether the slides need it "
+                       "(edit a claim to add it, or ignore):\n\n"
+                       + "\n".join(f"- {api.statement(a)} (`{a['id']}`)" for a in left_out))
 
     st.divider()
     st.markdown("### Sign-off")
@@ -676,9 +687,39 @@ def render_run(events: list[dict]):
         st.caption(f"run `{last['run_id']}`")
 
 
+def _current_job():
+    """The job this visitor started; kept in the URL too, so a page refresh finds it again."""
+    job_id = st.session_state.get("job_id") or st.query_params.get("job")
+    job = jobs.get(job_id)
+    if job is not None:
+        st.session_state.job_id = job.id
+    return job
+
+
+@st.fragment(run_every=3)
+def job_progress(job_id: str):
+    job = jobs.get(job_id)
+    if job is None:
+        return
+    if job.done:
+        st.rerun()  # whole page: show the result
+    with st.status(f"Working… {job.elapsed:.0f}s so far (a local model on this Mac; usually 1–6 minutes)",
+                   expanded=True, state="running"):
+        st.caption("You can switch tabs, refresh or come back later: the draft keeps running and is saved "
+                   "to the Drafts tab when it is ready.")
+        for e in job.events:
+            if e["step"] != "done":
+                st.write(f"{_step_name(e['step'])}: **{e['status']}** · {e['ms'] / 1000:.1f}s")
+
+
 def create(concepts, assertions):
     st.session_state.spine_rows = assertions
-    has_run = bool(st.session_state.get("last_run"))
+    job = _current_job()
+    if job is not None and job.done and st.session_state.get("last_run_job") != job.id:
+        st.session_state.last_run = job.events
+        st.session_state.last_run_job = job.id
+    working = job is not None and not job.done
+    has_run = bool(st.session_state.get("last_run")) or working
     with st.expander("✍️ Start another draft" if has_run else "✍️ What are you creating?", expanded=not has_run):
         st.selectbox("Pick a demo example (optional)", [""] + EXAMPLES, key="example",
                      on_change=lambda: _set_topic(st.session_state.example),
@@ -700,30 +741,32 @@ def create(concepts, assertions):
         import time as _t
         limit = run_allowed()
         lock = model_lock()
-        if limit:
+        if working:
+            st.warning("Your previous draft is still being created; it is shown below.")
+        elif limit:
             st.warning(limit)
         elif not lock.acquire(blocking=False):
             st.warning("Another draft is being created right now (the local model runs one job at a "
                        "time). Please try again in a minute or two.")
         else:
-            try:
-                st.session_state.run_times.append(_t.time())
-                events = []
-                with st.status("Working… (a local model on this Mac; about 1–3 minutes)",
-                               expanded=True) as status:
-                    for e in pipeline.run(conn(), model(), topic, artifact, audience):
-                        events.append(e)
-                        if e["step"] != "done":
-                            st.write(f"{_step_name(e['step'])}: **{e['status']}** · {e['ms'] / 1000:.1f}s")
-                    label = {"declined": "Declined", "not_found": "Not found in sources",
-                             "error": "Failed"}.get(events[-1]["status"], "Draft ready")
-                    status.update(label=label, state="error" if events[-1]["status"] == "error" else "complete",
-                                  expanded=False)
-                st.session_state.last_run = events
-            finally:
-                lock.release()
-            st.rerun()  # redraw with the input panel collapsed so the result sits at the top
-    if st.session_state.get("last_run"):
+            st.session_state.run_times.append(_t.time())
+            llm = model()
+
+            def run():
+                c = fresh_connection()
+                try:
+                    yield from pipeline.run(c, llm, topic, artifact, audience)
+                finally:
+                    c.close()
+
+            new = jobs.start(run, label=topic, on_finish=lock.release)
+            st.session_state.job_id = new.id
+            st.session_state.last_run = None
+            st.query_params["job"] = new.id
+            st.rerun()
+    if working:
+        job_progress(job.id)
+    elif st.session_state.get("last_run"):
         render_run(st.session_state.last_run)
 
 

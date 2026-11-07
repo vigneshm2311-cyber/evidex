@@ -40,3 +40,6 @@
 | 2026-11-06 | Evaluation questions drafted by Claude, gold labels only from the doctor; unlabelled metrics reported as "not computed" | Brief: never generate gold answers or results |
 | 2026-11-06 | Number-error injection test (code alters one number per passing claim; measures code Verifier vs LLM judge) | Needs no clinical gold: the spine is the reference |
 | 2026-11-06 | Evaluation runs are not saved as drafts; their agent calls are logged with an `eval-` run prefix | Keeps the Drafts list clean, keeps the audit trail |
+| 2026-11-07 | Drafts run in a background thread with an in-memory job registry; job id in the URL | A rerun or reconnect stopped in-page runs and lost minutes of work; no extra dependency (no queue server) for one local model |
+| 2026-11-07 | Wording faults (cut-off word, run-together words, repeated phrase) are Verifier issues and block approval until edited | Both the model and a doctor's edit produced such text and it passed as ✔; checks are narrow to avoid false flags (1/172 on eval claims, a true one) |
+| 2026-11-07 | Rows the Planner chose but no claim cites are a warning, not a block | The doctor decides whether the slides need them |

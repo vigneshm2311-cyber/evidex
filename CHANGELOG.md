@@ -21,3 +21,10 @@
 - Fix: the app's cached database connection hung every page after a network drop; it now uses TCP keepalives, a 15 s TCP timeout and a ping every 30 s, and reconnects.
 - Off-topic requests: code rules for drugs, complications and nutrition plans, and a vocabulary check (the topic must share a subject word with the spine), both before any model call. q22, q23 and q25 rerun: all "Not found in sources".
 - UX from the walkthrough: login page explains Evidex and has an Enter button; evaluator login survives a page refresh (signed token in the URL, `SESSION_SECRET`); Create is a form (one click), collapses after a run so the result is at the top, with a step summary and a scope hint; claims show as text with an Edit toggle (edit saves in one click); "Approve all" for Verifier-passed claims behind an explicit numbers-checked confirmation; evaluator wording for unchecked rows and a "Verification" tab explaining the doctor's check; reload button for the doctor only; no URL parameter on first load; claim typography tidy ("6.4%", no mid-sentence capitals from concept names). 91 tests passing.
+
+## 2026-11-07
+- Doctor usability test (draft on "Diagnosing diabetes and prediabetes in Indian adults…" for residents, edit, review, sign-off, export) found: a draft lost when the page reran mid-run; a cut-off word ("Diabetes mell,") and a botched edit both passed the Verifier; a planned row (A1C unreliable in HIV) silently left out.
+- Drafts now run as background jobs (`evidex/jobs.py`): a refresh, tab switch or reconnect no longer cancels a run; the job id is kept in the URL and the page polls progress. Live check: reloaded mid-run, the draft finished and appeared.
+- Verifier wording checks in code: cut-off words, words run together, repeated 7-word phrases. On the 172 evaluation claims: 1 flag, the real "Diabetes mell," in q02 that had passed before.
+- Planned-but-unused spine rows are stored with the draft (migration 005, `draft.unused_rows`) and shown to the reviewer under each section.
+- `scripts/ask.py` fixed for the current claim format. 98 tests passing.

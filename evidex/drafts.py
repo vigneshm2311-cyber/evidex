@@ -23,10 +23,10 @@ def _actor(cur, actor: str):
 
 def save(conn, run_id: str, data: dict) -> str:
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute("insert into draft (id, request, artifact, audience, title, model_not_covered) "
-                    "values (%s, %s, %s, %s, %s, %s)",
+        cur.execute("insert into draft (id, request, artifact, audience, title, model_not_covered, unused_rows) "
+                    "values (%s, %s, %s, %s, %s, %s, %s)",
                     (run_id, data["request"], data["artifact"], data["audience"], data["title"],
-                     Jsonb(data.get("model_not_covered", []))))
+                     Jsonb(data.get("model_not_covered", [])), Jsonb(data.get("unused_rows", {}))))
         for si, s in enumerate(data["sections"]):
             for ci, c in enumerate(s["claims"]):
                 verdict = {**c["verdict"], "regenerated": c.get("regenerated", False),

@@ -365,7 +365,42 @@ def check_text(text: str, cited: list[dict]) -> dict:
     issues += [c["why"] for c in number_checks if not c["ok"]]
     if PATIENT_WORDING.search(text or ""):
         issues.append("patient-directed wording")
+    issues += wording_issues(text or "", cited)
     return {"number_checks": number_checks, "issues": issues}
+
+
+GLUE_OK = {"mmHg", "HbA1c", "eGFR"}
+
+
+def wording_issues(text: str, cited: list[dict]) -> list[str]:
+    """Typing faults a reader would see on a slide: a word cut off ('Diabetes mell, is'), words run
+    together ('200 mDiabetes', 'mg/dL.g/dL') or a phrase repeated (a botched paste)."""
+    out = []
+    source = " ".join(" ".join(filter(None, [api.statement(a), a.get("condition_text") or "",
+                                             a.get("subject_name") or "", a.get("object_name") or ""]))
+                      for a in cited).lower()
+    src_words = set(re.findall(r"[a-z][a-z0-9-]*", source))
+    cut = sorted({w for w in re.findall(r"\b([A-Za-z]{3,})[,;:]", text)
+                  if w.lower() not in src_words
+                  and any(s.startswith(w.lower()) and len(s) - len(w) >= 3 for s in src_words)})
+    for w in cut:
+        full = next(s for s in sorted(src_words) if s.startswith(w.lower()) and len(s) - len(w) >= 3)
+        out.append(f"wording: '{w}' looks cut off (did you mean '{full}'?)")
+    glued = [w for w in re.findall(r"\b[a-z]+[A-Z][a-z]+\b", text) if w not in GLUE_OK]
+    glued += re.findall(r"[A-Za-z]{2}\.[a-z]{1,4}/", text.replace("e.g.", "").replace("i.e.", ""))
+    if glued:
+        out.append("wording: words run together: " + ", ".join(f"'{g}'" for g in glued))
+    words = re.findall(r"[a-z0-9-]+", text.lower())
+    seen, repeated = set(), None
+    for i in range(len(words) - 6):
+        gram = " ".join(words[i:i + 7])
+        if gram in seen:
+            repeated = gram
+            break
+        seen.add(gram)
+    if repeated:
+        out.append(f"wording: repeated phrase '{repeated}'")
+    return out
 
 
 def check_claim(claim: dict, by_id: dict[str, dict]) -> dict:

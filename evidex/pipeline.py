@@ -176,6 +176,9 @@ def run(conn, llm: LLM, request: str, artifact: str = "slides",
         # The model's own list of gaps is unreliable when it did produce an outline, so it is
         # kept for the audit log but not shown as fact.
         "model_not_covered": plan["not_covered"], "not_covered": []}
+    cited = {i for s in sections for c in s["claims"] for i in c["assertion_ids"]}
+    data["unused_rows"] = {s["heading"]: [i for i in s["assertion_ids"] if i not in cited]
+                           for s in plan["sections"] if any(i not in cited for i in s["assertion_ids"])}
     if save and any(s["claims"] for s in data["sections"]):
         data["draft_id"] = drafts.save(conn, run_id, data)
     yield {"run_id": run_id, "step": "done", "status": "ok", "ms": 0, "data": data}

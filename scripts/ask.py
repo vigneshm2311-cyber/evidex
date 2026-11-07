@@ -41,9 +41,10 @@ for e in pipeline.run(conn, OllamaLLM(), a.request, a.artifact, a.audience):
         if d["error"]:
             print("ERROR", d["error"])
         for c in d["claims"]:
-            mark = "OK " if c["ok"] else "FLAG"
+            v = c.get("verdict") or c
+            mark = "OK " if v.get("ok") else "FLAG"
             print(f"  {mark} {c['text']}  {c['assertion_ids']}")
-            for i in c["issues"]:
+            for i in v.get("issues", []):
                 print("       !", i)
     elif e["step"] == "done":
-        print("run", e["run_id"])
+        print("run", e["run_id"], "| draft", d.get("draft_id"))
