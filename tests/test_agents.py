@@ -319,6 +319,10 @@ def test_topic_with_no_spine_words_is_not_found(conn):
     assert pipeline.unknown_topic(conn, "Diagnosing heart failure") == ["heart", "failure"]
     assert pipeline.unknown_topic(conn, "Teaching slides on diabetes for nurses") == []   # nothing specific asked
     assert pipeline.unknown_topic(conn, "HbA1c and sickle cell trait") == []
+    # format words are not topics: the subject decides
+    assert pipeline.unknown_topic(conn, "Flowchart for diagnosing diabetes") == []
+    assert pipeline.unknown_topic(conn, "Diagnostic algorithm and pathway for diabetes") == []
+    assert pipeline.unknown_topic(conn, "Flowchart for Diabetes Care") == ["care"]
     ev = run(conn, FakeLLM(plan=GOOD_PLAN, claims=GOOD_CLAIMS), "Tuberculosis and diabetes")
     assert ev[-1]["status"] == "not_found" and "tuberculosis" in ev[-1]["data"]["not_covered"][0]
 

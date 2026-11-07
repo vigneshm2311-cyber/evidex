@@ -52,6 +52,8 @@ diabetes diabetic dm india indian indians south asian asians
 diagnosis diagnosing diagnose diagnosed diagnostic screening screen screened testing test tests tested criteria
 prevention preventing prevent risk risks factors factor classification classify types type stages stage
 definition define defined causes features signs symptoms evaluation assessment approach role use using
+flowchart flowcharts flow chart charts algorithm algorithms diagram diagrams pathway pathways table tables
+infographic poster quiz mcq mcqs presentation ppt pptx docx outline step steps stepwise
 """.split())
 
 
