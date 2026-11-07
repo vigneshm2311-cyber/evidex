@@ -306,6 +306,6 @@ def report_md(meta: dict, results: list[dict], auto: dict | None, fid: dict | No
           "- Small question set drafted by the team; gold labels by: "
           + (", ".join(gold["labelled_by"]) if gold and gold.get("labelled_by") else "none yet") + ".",
           "- Spine values not yet fully checked against the 2026 text (see header); metrics measure agreement with the spine, not clinical truth.",
-          "- One local 8B model; results may differ with other models or runs.",
+          f"- One model (`{meta['model']}`); results may differ with other models or runs.",
           f"- Errors during the run: {', '.join(errs) if errs else 'none'}."]
     return "\n".join(L) + "\n"
