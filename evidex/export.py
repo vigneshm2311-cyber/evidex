@@ -13,7 +13,7 @@ from datetime import datetime
 from psycopg.types.json import Jsonb
 
 from . import drafts
-from .agents.steps import numbers_in
+from .agents.steps import PATIENT_NOTE, PATIENT_PERSONA, numbers_in
 
 NOT_PROVIDED = "Not provided"
 MAX_BULLETS = 6
@@ -27,7 +27,20 @@ class ExportError(ValueError):
 
 def _model_name(conn, draft_id: str) -> str:
     row = conn.execute("select distinct model from agent_call where run_id = %s limit 1", (draft_id,)).fetchone()
-    return row[0] if row else "a local language model"
+    return row[0] if row else "a language model"
+
+
+def ai_note(model: str, signed: str, has_literature: bool, audience: str) -> str:
+    sources = ("a doctor-curated diabetes knowledge base anchored to the ADA Standards of Care in Diabetes "
+               "2026 (Sections 2-3)")
+    if has_literature:
+        sources += ", with context from the published papers and files listed in the references"
+    note = (f"Prepared with Evidex. Drafted by an AI model ({model}) from {sources}. Every number was "
+            "checked by code against its cited source, and every statement was reviewed and approved by "
+            f"{signed}. General teaching material: not advice about any individual patient.")
+    if audience == PATIENT_PERSONA:
+        note = PATIENT_NOTE + " " + note
+    return note
 
 
 def build(conn, draft_id: str) -> dict:
@@ -57,11 +70,7 @@ def build(conn, draft_id: str) -> dict:
 
     signed = f"{d['signed_by']}, {d['signed_at'].astimezone():%d %b %Y}"
     model = _model_name(conn, draft_id)
-    note = (f"Prepared with Evidex. Drafted by a local AI model ({model}) from a doctor-curated "
-            "diabetes knowledge base anchored to the ADA Standards of Care in Diabetes 2026 "
-            "(Sections 2-3). Every number was checked against that knowledge base by code, and "
-            f"every statement was reviewed and approved by {signed}. General teaching material: "
-            "not advice about any individual patient.")
+    note = ai_note(model, signed, any(r.get("kind") for r in refs.values()), d["audience"])
     return {"draft_id": d["id"], "title": d["title"], "audience": d["audience"],
             "artifact": d["artifact"], "request": d["request"], "signed": signed,
             "sections": sections, "references": sorted(refs.values(), key=lambda r: r["n"]),
@@ -101,6 +110,8 @@ def ref_tag(refs: list[int]) -> str:
 
 
 def reference_text(r: dict) -> str:
+    if r.get("kind"):  # PubMed record or uploaded file: the stored citation line
+        return r["anchor"]
     text = f"{r['statement']}"
     if r.get("condition_text"):
         text += f" ({r['condition_text']})"
@@ -272,12 +283,166 @@ def docx_text(data: bytes) -> str:
     return "\n".join(p.text for p in Document(io.BytesIO(data)).paragraphs)
 
 
+# ---------------- flowchart (PPTX, drawn by code from approved claims) ----------------
+
+def to_flowchart(doc: dict) -> bytes:
+    """One slide per up to 6 steps: each section is a step box (heading + its approved statements),
+    joined by arrows in reading order. References and the note follow on their own slides."""
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+    from pptx.oxml.ns import qn
+    from pptx.util import Inches, Pt
+
+    INK, MUTED, ACCENT, FILL = (RGBColor(0x1F, 0x29, 0x37), RGBColor(0x5B, 0x67, 0x75),
+                                RGBColor(0x0F, 0x76, 0x6E), RGBColor(0xEC, 0xF6, 0xF5))
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    blank = prs.slide_layouts[6]
+    steps_ = [s for s in doc["sections"] if s["items"]]
+
+    s = prs.slides.add_slide(blank)
+    tb = s.shapes.add_textbox(Inches(0.5), Inches(0.25), Inches(12.3), Inches(0.8)).text_frame
+    tb.word_wrap = True
+    tb.text = doc["title"]
+    tb.paragraphs[0].font.size, tb.paragraphs[0].font.bold, tb.paragraphs[0].font.color.rgb = Pt(26), True, INK
+    n = len(steps_)
+    cols = min(n, 3) if n > 1 else 1
+    rows = -(-n // cols)
+    gap_x, gap_y = Inches(0.55), Inches(0.45)
+    top, left = Inches(1.2), Inches(0.5)
+    bw = int((Inches(12.33) - gap_x * (cols - 1)) / cols)
+    bh = int((Inches(5.6) - gap_y * (rows - 1)) / rows)
+    longest = max((sum(len(i["text"]) for i in st["items"]) for st in steps_), default=0)
+    size = 13 if longest < 220 and rows == 1 else 11 if longest < 330 else 9.5
+    boxes = []
+    for k, st in enumerate(steps_):
+        r, c = divmod(k, cols)
+        x, y = left + c * (bw + gap_x), top + r * (bh + gap_y)
+        shp = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, bw, bh)
+        shp.adjustments[0] = 0.08
+        shp.fill.solid()
+        shp.fill.fore_color.rgb = FILL
+        shp.line.color.rgb = ACCENT
+        tf = shp.text_frame
+        tf.word_wrap = True
+        tf.margin_left = tf.margin_right = Inches(0.12)
+        p = tf.paragraphs[0]
+        p.text = f"{k + 1}. {st['heading']}"
+        p.font.size, p.font.bold, p.font.color.rgb = Pt(size + 2), True, ACCENT
+        for i in st["items"]:
+            q = tf.add_paragraph()
+            q.text = "• " + i["text"] + ref_tag(i["refs"])
+            q.font.size, q.font.color.rgb = Pt(size), INK
+            q.space_before = Pt(4)
+        boxes.append(shp)
+    for a_, b_ in zip(boxes, boxes[1:]):
+        same_row = abs(a_.top - b_.top) < Inches(0.1)
+        if same_row:
+            x1, y1, x2, y2 = a_.left + a_.width, a_.top + a_.height // 2, b_.left, b_.top + b_.height // 2
+        else:
+            x1, y1, x2, y2 = a_.left + a_.width // 2, a_.top + a_.height, b_.left + b_.width // 2, b_.top
+        ln = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x1, y1, x2, y2)
+        ln.line.color.rgb, ln.line.width = ACCENT, Pt(2)
+        end = ln.line._get_or_add_ln()
+        tail = end.makeelement(qn("a:tailEnd"), {"type": "triangle"})
+        end.append(tail)
+    foot = s.shapes.add_textbox(Inches(0.5), Inches(7.0), Inches(12.3), Inches(0.4)).text_frame
+    foot.text = f"Evidex · {doc['audience']} · approved by {doc['signed']}"
+    foot.paragraphs[0].font.size, foot.paragraphs[0].font.color.rgb = Pt(10), MUTED
+
+    s = prs.slides.add_slide(blank)
+    tf = s.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(12.1), Inches(6.6)).text_frame
+    tf.word_wrap = True
+    tf.text = "References"
+    tf.paragraphs[0].font.size, tf.paragraphs[0].font.bold = Pt(24), True
+    for r in doc["references"]:
+        p = tf.add_paragraph()
+        p.text = f"[{r['n']}] {reference_text(r)}"
+        p.font.size = Pt(10 if len(doc["references"]) > 8 else 12)
+    p = tf.add_paragraph()
+    p.text = doc["ai_note"]
+    p.font.size, p.font.color.rgb = Pt(11), MUTED
+    p.space_before = Pt(14)
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+# ---------------- one-page summary (PDF) ----------------
+
+FONT_DIR = __import__("pathlib").Path(__file__).parent / "assets" / "fonts"
+MIN_PT = 7.5
+
+
+def to_onepager(doc: dict) -> bytes:
+    """A4, one page. The font shrinks down to MIN_PT; if it still does not fit, export is blocked."""
+    from fpdf import FPDF
+
+    def render(pt: float) -> FPDF:
+        pdf = FPDF(format="A4", unit="mm")
+        pdf.set_auto_page_break(True, margin=12)
+        pdf.set_margins(14, 12, 14)
+        pdf.add_font("DejaVu", "", str(FONT_DIR / "DejaVuSans.ttf"))
+        pdf.add_font("DejaVu", "B", str(FONT_DIR / "DejaVuSans-Bold.ttf"))
+        pdf.add_page()
+        lh = pt * 0.48
+        pdf.set_font("DejaVu", "B", pt + 7)
+        pdf.set_text_color(31, 41, 55)
+        pdf.multi_cell(0, (pt + 7) * 0.5, doc["title"], new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("DejaVu", "", pt)
+        pdf.set_text_color(91, 103, 117)
+        pdf.multi_cell(0, lh, f"Quick reference for {doc['audience']} · approved by {doc['signed']}",
+                       new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(lh * 0.6)
+        for sec in doc["sections"]:
+            pdf.set_font("DejaVu", "B", pt + 2)
+            pdf.set_text_color(15, 118, 110)
+            pdf.multi_cell(0, (pt + 2) * 0.5, sec["heading"], new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("DejaVu", "", pt)
+            pdf.set_text_color(31, 41, 55)
+            for i in sec["items"] or [{"text": NOT_PROVIDED, "refs": []}]:
+                pdf.set_x(pdf.l_margin + 3)
+                pdf.multi_cell(0, lh, "• " + i["text"] + ref_tag(i["refs"]), new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(lh * 0.4)
+        pdf.set_font("DejaVu", "B", pt)
+        pdf.multi_cell(0, lh, "References", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("DejaVu", "", pt - 1)
+        for r in doc["references"]:
+            pdf.multi_cell(0, (pt - 1) * 0.45, f"[{r['n']}] {reference_text(r)}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(lh * 0.4)
+        pdf.set_text_color(91, 103, 117)
+        pdf.multi_cell(0, (pt - 1) * 0.45, doc["ai_note"], new_x="LMARGIN", new_y="NEXT")
+        return pdf
+
+    pt = 10.0
+    while pt >= MIN_PT:
+        pdf = render(pt)
+        if pdf.page_no() == 1:
+            return bytes(pdf.output())
+        pt -= 0.5
+    raise ExportError("the content does not fit on one page; remove a few statements or choose the handout")
+
+
+def pdf_text(data: bytes) -> str:
+    from pypdf import PdfReader
+    return "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+
+
 # ---------------- entry points ----------------
 
-FORMATS = {
-    "pptx": (to_pptx, pptx_text, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-    "docx": (to_docx, docx_text, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+FORMATS = {  # fmt: (make, read back, mime, file extension)
+    "pptx": (to_pptx, pptx_text, PPTX_MIME, "pptx"),
+    "docx": (to_docx, docx_text, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+    "flowchart": (to_flowchart, pptx_text, PPTX_MIME, "pptx"),
+    "pdf": (to_onepager, pdf_text, "application/pdf", "pdf"),
 }
+# What each artifact offers for download, main file first.
+DOWNLOADS = {"slides": ["pptx", "docx"], "handout": ["docx", "pptx"], "flowchart": ["flowchart", "pdf"],
+             "onepager": ["pdf", "docx"]}
+LABELS = {"pptx": "Slides (PPTX)", "docx": "Handout (DOCX)", "flowchart": "Flowchart (PPTX)",
+          "pdf": "One-page summary (PDF)"}
 
 
 def render(conn, draft_id: str, fmt: str) -> dict:
@@ -286,14 +451,17 @@ def render(conn, draft_id: str, fmt: str) -> dict:
         raise ExportError(f"unknown format {fmt}")
     doc = build(conn, draft_id)
     problems = fidelity(doc)
-    make, read, mime = FORMATS[fmt]
-    data = make(doc) if not problems else b""
+    make, read, mime, ext = FORMATS[fmt]
+    try:
+        data = make(doc) if not problems else b""
+    except ExportError as e:
+        problems, data = [str(e)], b""
     if not problems:
         problems = check_rendered(doc, read(data))
     if problems:
         raise ExportError("export blocked: " + "; ".join(problems))
     slug = re.sub(r"[^a-z0-9]+", "-", doc["title"].lower()).strip("-")[:50] or "evidex"
-    return {"filename": f"{slug}.{fmt}", "data": data, "mime": mime,
+    return {"filename": f"{slug}{'-flowchart' if fmt == 'flowchart' and 'flowchart' not in slug else ''}.{ext}", "data": data, "mime": mime,
             "sha256": hashlib.sha256(data).hexdigest(),
             "claims": [i["claim_id"] for s in doc["sections"] for i in s["items"]]}
 

@@ -11,4 +11,10 @@ These rules are non-negotiable. They keep Evidex within the Health-a-thon 2026 s
 7. **No answer without sources.** If the library has nothing, Evidex says "Not found in sources."
 8. **No invented references.** Every citation must come from a real API response or a real library document.
 
+## Amendment, 7 Nov 2026 (approved by Dr Vignesh M for the three-phase version)
+
+9. **Two source layers.** The spine (ADA 2026, Sections 2-3) is the grounding layer: a topic the spine does not recognise is answered "Not found in sources", and guideline numbers are checked against it. Published literature from PubMed, and papers or decks the user uploads, add context on top of a spine topic. Every literature statement cites a real PubMed record (PMID and link taken from the API response) or the uploaded file, and every number in it must appear in that source's text (checked by code).
+10. **Uploads are papers or teaching material, never patient records.** A PII check runs on every uploaded file and typed request and blocks text that looks like a patient record (record numbers, dates of birth, phone or Aadhaar numbers).
+11. **Patient and public persona = general education only.** Plain language, no individual advice, and every output for this persona ends with "General information, not advice for any individual. Talk to your doctor."
+
 If any change conflicts with these rules, it must not be merged.

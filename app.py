@@ -1,4 +1,5 @@
-"""Evidex: create drafts from the diabetes spine, review and sign them off, and browse/edit the spine.
+"""Evidex: request → building → draft. Teaching material grounded in the diabetes spine and recent research,
+approved by a doctor before download. The Library keeps the spine encyclopedia, graph and review.
 
 Run:  .venv/bin/streamlit run app.py
 """
@@ -11,7 +12,7 @@ import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
-from evidex import drafts, export, jobs, pipeline
+from evidex import drafts, export, jobs, studio
 from evidex.agents import steps
 from evidex.spine import api
 from evidex.spine.vocab import OPERATORS, STATUSES
@@ -19,7 +20,7 @@ from evidex.spine.vocab import OPERATORS, STATUSES
 load_dotenv()
 st.set_page_config(page_title="Evidex", page_icon="📚", layout="wide")
 try:  # Streamlit Cloud keeps settings in st.secrets; copy plain values into the environment
-    for _k, _v in st.secrets.items():
+    for _k, _v in (st.secrets.items() if st.secrets.load_if_toml_exists() else []):
         if isinstance(_v, (str, int, float)) and _k not in os.environ:
             os.environ[_k] = str(_v)
 except Exception:  # no secrets file when running locally
@@ -422,7 +423,7 @@ STATUS_BADGE = {"pending": ":orange[● to review]", "approved": ":green[✔ app
 
 
 def _who() -> str:
-    return (st.session_state.get("reviewer") or "").strip()
+    return (st.session_state.get("reviewer") or st.session_state.get("approver") or "").strip()
 
 
 def _act(fn, *args, ok_msg: str = "", **kw):
@@ -607,228 +608,489 @@ def review_draft(draft_id: str, ctx: str):
         st.rerun()
 
 
-def drafts_page():
-    rows = drafts.list_drafts(conn())
-    if not rows:
-        st.info("No drafts yet. Create one in the Create tab.")
-        return
-    labels = {r["id"]: f"{r['title']} · {r['created_at'].astimezone():%d %b %H:%M} · "
-                       + ("signed off" if r["status"] == "signed_off" else f"{r['pending']}/{r['claims']} to review")
-              for r in rows}
-    ids = list(labels)
-    default = st.session_state.get("open_draft")
-    pick = st.selectbox("Draft", ids, index=ids.index(default) if default in ids else 0,
-                        format_func=labels.get)
-    review_draft(pick, "drafts")
-
-
-# ---------- create (agents) ----------
-
-EXAMPLES = [
-    "Diagnostic criteria for prediabetes",
-    "Diagnosing diabetes in Indian adults",
-    "When is HbA1c unreliable for diagnosing diabetes?",
-    "Preventing type 2 diabetes in people with prediabetes",
-    "What metformin dose should I start for my 54-year-old patient with A1C 7.2?",
-    "Insulin pump settings for type 1 diabetes",
-]
-STEP_NAMES = {"scope_guard": "Scope Guard", "spine_lookup": "Spine lookup", "planner": "Planner",
-              "done": "Done"}
-
-
 @st.cache_resource
 def model():
     from evidex.llm import make_llm
     return make_llm()
 
 
-def _step_name(step: str) -> str:
-    if step.startswith("synthesizer:"):
-        return f"Synthesizer · {step.split(':', 1)[1]}"
-    return STEP_NAMES.get(step, step)
+# ================= the three-phase flow =================
+
+FORMAT_LABELS = {"slides": "🖥️ Slides", "handout": "📄 Handout", "flowchart": "🔀 Flowchart",
+                 "onepager": "📝 One-page summary"}
+FORMAT_NOUN = {"slides": "slide deck", "handout": "handout", "flowchart": "flowchart",
+               "onepager": "one-page summary"}
+EXAMPLES = [
+    "Slides on diagnosing diabetes and prediabetes for final-year students",
+    "Flowchart for screening type 2 diabetes in adults",
+    "When is HbA1c unreliable? Handout for residents",
+    "One-page summary on preventing type 2 diabetes for nurses",
+    "Explaining prediabetes to patients",
+]
+PLAIN_STEPS = [("files", "Reading your files"), ("spine_lookup", "Checking the guideline"),
+               ("research", "Finding recent research"), ("planner", "Planning the outline"),
+               ("writing", "Writing and checking every number")]
 
 
-def _set_topic(t: str, reset: bool = False):
-    st.session_state.topic = t
-    if reset:
-        st.session_state.last_run = None
+def sx() -> dict:
+    """This visitor's state in the flow."""
+    if "sx" not in st.session_state:
+        st.session_state.sx = {"phase": "request", "understanding": None, "files": [], "notice": None}
+    return st.session_state.sx
 
 
-def render_run(events: list[dict]):
-    last = events[-1]
-    d = last["data"]
-    st.caption("Steps: " + " → ".join(f"{_step_name(e['step'])} ({e['ms'] / 1000:.0f}s)"
-                                      for e in events if e["step"] != "done")
-               + f" · total {sum(e['ms'] for e in events) / 1000:.0f}s")
-    if last["status"] == "declined":
-        st.error(f"**Declined by the Scope Guard** ({d['decided_by']}). {d['reason']}\n\n"
-                 "Evidex reports what guidelines say in general; it does not advise on individual patients.")
-        if d.get("general_query"):
-            st.button(f"Ask the general question instead: “{d['general_query']}”",
-                      on_click=_set_topic, args=(d["general_query"], True))
-    elif last["status"] == "not_found":
-        st.warning(f"**{d['message']}.** The spine (ADA 2026 Sections 2–3) does not cover this topic, "
-                   "so Evidex will not write about it.")
-        if d.get("not_covered"):
-            st.caption("Not covered: " + "; ".join(d["not_covered"]))
-    elif last["status"] == "error":
-        st.error(f"{_step_name(last['step'])} failed: {d['error']}")
-    elif last["step"] == "done":
-        if d.get("draft_id"):
-            st.success("Draft saved. Review each claim below, then sign off. "
-                       "(It is also listed in the Drafts tab.)")
-            review_draft(d["draft_id"], "create")
-        else:
-            st.warning("The run produced no claims to review.")
+def reset_flow():
+    st.session_state.sx = {"phase": "request", "understanding": None, "files": [], "notice": None}
+    st.session_state.pop("job_id", None)
+    for k in ("job", "draft"):
+        st.query_params.pop(k, None)
 
-    with st.expander("What each agent saw and returned (audit log)"):
-        for e in events:
-            st.markdown(f"**{_step_name(e['step'])}** · {e['status']} · {e['ms'] / 1000:.1f}s")
+
+def stepper(active: int):
+    names = ["Your request", "Building", "Your draft"]
+    cols = st.columns(3)
+    for i, (col, name) in enumerate(zip(cols, names), 1):
+        mark = "✅" if i < active else ("🟢" if i == active else "⚪")
+        weight = f"**{name}**" if i == active else name
+        col.markdown(f"{mark} &nbsp; {i} · {weight}")
+    st.divider()
+
+
+def _pick_suggestion(text: str):
+    st.session_state.req_text = text
+    sx().update(phase="request", notice=("info", "Suggestion added below: check who it is for and the format, "
+                                                 "then press Continue."), suggestions=[])
+    st.query_params.pop("job", None)
+
+
+def suggest_buttons(items: list[str], ctx: str):
+    for i, t in enumerate(items):
+        st.button(f"→ {t}", key=f"sug-{ctx}-{i}", on_click=_pick_suggestion, args=(t,))
+
+
+def _use_example():
+    if st.session_state.get("example_pick"):
+        st.session_state.req_text = st.session_state.example_pick
+
+
+def phase_request():
+    stepper(1)
+    if "prefill" in sx():
+        st.session_state.req_text = sx().pop("prefill")
+    st.markdown("### What would you like to make?")
+    st.caption("Describe it in a sentence, attach papers or a deck if you have them, and pick who it is for.")
+    if note := sx().get("notice"):
+        kind, msg = note
+        (st.error if kind == "error" else st.warning if kind == "warning" else st.info)(msg)
+        suggest_buttons(sx().get("suggestions") or [], "req")
+    st.selectbox("Need an idea?", [""] + EXAMPLES, key="example_pick", on_change=_use_example,
+                 format_func=lambda x: x or "Pick an example…")
+    with st.form("request_form", border=True):
+        st.text_area("Your request", key="req_text", height=90,
+                     placeholder="e.g. Slides on diagnosing diabetes in Indian adults for medical students")
+        files = st.file_uploader("Attach papers (PDF) or a deck (PPTX) — optional", type=["pdf", "pptx"],
+                                 accept_multiple_files=True,
+                                 help="Research papers or teaching material only, never patient records.")
+        c1, c2 = st.columns(2)
+        persona = c1.radio("Who is it for?", steps.AUDIENCES, key="req_persona")
+        artifact = c2.radio("Format", list(FORMAT_LABELS), format_func=FORMAT_LABELS.get, key="req_format")
+        go = st.form_submit_button("Continue →", type="primary")
+    st.caption("Evidex covers the diagnosis, classification, screening and prevention of diabetes, grounded "
+               "in the ADA Standards of Care 2026 and recent research. General teaching material only.")
+    if not go:
+        return
+    request = (st.session_state.get("req_text") or "").strip()
+    raw = [(f.name, f.getvalue()) for f in (files or [])]
+    if not request and not raw:
+        sx()["notice"] = ("warning", "Type what you need or attach a paper or deck.")
+        st.rerun()
+    texts, problems = studio.read_files(raw)
+    if problems:
+        sx()["notice"] = ("error", " ".join(problems))
+        st.rerun()
+    limit = run_allowed()
+    if limit:
+        sx()["notice"] = ("warning", limit)
+        st.rerun()
+    lock = model_lock()
+    if not lock.acquire(timeout=30):
+        sx()["notice"] = ("warning", "Evidex is busy with another request. Please try again in a minute.")
+        st.rerun()
+    try:
+        with st.spinner("Reading your request…"):
+            res = studio.understand(conn(), model(), request, persona, artifact, texts)
+    finally:
+        lock.release()
+    st.session_state.run_times.append(__import__("time").time())
+    status = res["status"]
+    if status == "ok":
+        sx().update(phase="confirm", understanding=res["understanding"], files=texts, notice=None, suggestions=[])
+    elif status == "declined":
+        msg = ("Evidex makes general teaching material and does not advise on individual patients. "
+               + (f"Try instead: “{res['general_query']}”" if res.get("general_query") else ""))
+        sx()["notice"] = ("error", msg)
+        if res.get("general_query"):
+            sx()["prefill"] = res["general_query"]
+    elif status == "not_found":
+        sx()["notice"] = ("warning", f"**Evidex can't make this one yet.** {res['reason']} It covers the diagnosis, "
+                                     "classification, screening and prevention of diabetes. Close to what you "
+                                     "asked, it can make:")
+        sx()["suggestions"] = res.get("suggestions", [])
+    else:
+        sx()["notice"] = ("error", res.get("message", "Something went wrong. Please try again."))
+    st.rerun()
+
+
+def phase_confirm():
+    stepper(1)
+    u = sx()["understanding"]
+    st.markdown("### Here's what I understood")
+    st.caption("Change anything that is not right, then build. Nothing is written until you confirm.")
+    with st.form("confirm_form", border=True):
+        title = st.text_input("Title", u["title"])
+        topic = st.text_input("Topic", u["topic"])
+        points = st.text_area("It will answer", "\n".join(u["key_points"]), height=130,
+                              help="One question per line.")
+        c1, c2 = st.columns(2)
+        persona = c1.selectbox("For", steps.AUDIENCES, steps.AUDIENCES.index(u["persona"]))
+        artifact = c2.selectbox("Format", list(FORMAT_LABELS), list(FORMAT_LABELS).index(u["artifact"]),
+                                format_func=FORMAT_LABELS.get)
+        if u.get("files"):
+            st.caption("📎 Using your files: " + ", ".join(u["files"])
+                       + (f" — {u['from_files']}" if u.get("from_files") else ""))
+        st.caption("Sources: the ADA Standards of Care 2026 knowledge base, recent PubMed research"
+                   + (" and your files." if u.get("files") else "."))
+        b1, b2 = st.columns([1, 4])
+        build = b1.form_submit_button("✓ Build it", type="primary")
+        back = b2.form_submit_button("← Change my request")
+    if back:
+        sx().update(phase="request", understanding=None)
+        st.rerun()
+    if not build:
+        return
+    key_points = [p.strip("-• ").strip() for p in points.splitlines() if p.strip()]
+    if not topic.strip() or not key_points:
+        st.error("Give a topic and at least one question.")
+        return
+    u = {**u, "title": title.strip() or u["title"], "topic": topic.strip(), "key_points": key_points[:6],
+         "persona": persona, "artifact": artifact}
+    lock = model_lock()
+    if not lock.acquire(blocking=False):
+        st.warning("Evidex is busy with another draft. Please try again in a minute.")
+        return
+    llm, files = model(), sx()["files"]
+
+    def run():
+        c = fresh_connection()
         try:
-            rows = conn().execute("select step, model, input, output, error, attempts, ms "
-                                  "from agent_call where run_id = %s order by id",
-                                  (last["run_id"],)).fetchall()
-        except psycopg.Error as err:
-            rows = []
-            st.caption(f"Could not load the log: {err}")
-        for step, mdl, inp, out, err, attempts, ms in rows:
-            st.markdown(f"---\n**{_step_name(step)}** · `{mdl}` · {attempts} attempt(s) · {ms / 1000:.1f}s")
-            st.text_area("System prompt", inp["system"], height=120, disabled=True,
-                         key=f"sys-{last['run_id']}-{step}")
-            st.text_area("What it was given", inp["user"], height=160, disabled=True,
-                         key=f"usr-{last['run_id']}-{step}")
-            st.json(out if out is not None else {"error": err}, expanded=False)
-        st.caption(f"run `{last['run_id']}`")
+            yield from studio.build(c, llm, u, files)
+        finally:
+            c.close()
 
-
-def _current_job():
-    """The job this visitor started; kept in the URL too, so a page refresh finds it again."""
-    job_id = st.session_state.get("job_id") or st.query_params.get("job")
-    job = jobs.get(job_id)
-    if job is not None:
-        st.session_state.job_id = job.id
-    elif job_id and not st.session_state.get("last_run"):
-        st.info("That draft run is no longer tracked here (the app was restarted). Drafts that finished "
-                "are saved: open the **Drafts** tab.")
-    return job
+    job = jobs.start(run, label=u["title"], on_finish=lock.release)
+    st.session_state.job_id = job.id
+    st.query_params["job"] = job.id
+    sx().update(phase="building", understanding=u)
+    st.rerun()
 
 
 @st.fragment(run_every=3)
-def job_progress(job_id: str):
+def building_progress(job_id: str):
     job = jobs.get(job_id)
     if job is None:
         return
     if job.done:
-        st.rerun()  # whole page: show the result
-    with st.status(f"Working… {job.elapsed:.0f}s so far ({MODEL_SHORT})",
-                   expanded=True, state="running"):
-        st.caption("You can switch tabs, refresh or come back later: the draft keeps running and is saved "
-                   "to the Drafts tab when it is ready.")
-        for e in job.events:
-            if e["step"] != "done":
-                st.write(f"{_step_name(e['step'])}: **{e['status']}** · {e['ms'] / 1000:.1f}s")
+        st.rerun()
+    seen = {e["step"].split(":")[0] for e in job.events}
+    has_files = bool(sx().get("files")) or "files" in seen
+    with st.container(border=True):
+        art = (sx().get("understanding") or {}).get("artifact")
+        st.markdown(f"#### Building your {FORMAT_NOUN.get(art, 'draft')}…")
+        st.caption(f"{job.elapsed:.0f} s so far · usually 2–5 minutes. You can leave this page; the draft is "
+                   "saved to **My drafts** when it is ready.")
+        order = [k for k, _ in PLAIN_STEPS if k != "files" or has_files]
+        current = next((k for k in order if k not in seen), None)
+        for key, label in PLAIN_STEPS:
+            if key not in order:
+                continue
+            if key in seen and key != current and key != "writing":
+                st.markdown(f"✅ {label}")
+            elif key == current or (key == "writing" and current is None):
+                st.markdown(f"⏳ **{label}**")
+            else:
+                st.markdown(f"⚪ {label}")
+        written = [e["step"].split(":", 1)[1] for e in job.events if e["step"].startswith("writing:")]
+        if written:
+            st.caption("Written: " + " · ".join(written))
 
 
-def create(concepts, assertions):
-    st.session_state.spine_rows = assertions
-    job = _current_job()
-    if job is not None and job.done and st.session_state.get("last_run_job") != job.id:
-        st.session_state.last_run = job.events
-        st.session_state.last_run_job = job.id
-    working = job is not None and not job.done
-    has_run = bool(st.session_state.get("last_run")) or working
-    with st.expander("✍️ Start another draft" if has_run else "✍️ What are you creating?", expanded=not has_run):
-        st.selectbox("Pick a demo example (optional)", [""] + EXAMPLES, key="example",
-                     on_change=lambda: _set_topic(st.session_state.example),
-                     format_func=lambda x: x or "—")
-        with st.form("create_form", border=False):
-            c1, c2 = st.columns(2)
-            artifact = c1.radio("Output", list(steps.ARTIFACTS), horizontal=True,
-                                format_func=lambda k: {"slides": "Teaching slides", "handout": "Teaching handout"}[k])
-            audience = c2.selectbox("Audience", steps.AUDIENCES)
-            st.text_area("Topic", key="topic", height=70,
-                         placeholder="e.g. Diagnosing diabetes in Indian adults")
-            st.caption("Covers ADA 2026 Sections 2–3: diagnosis, classification, screening and prevention. "
-                       "General teaching topics only: no individual patients, doses or treatment plans.")
-            submitted = st.form_submit_button("Create draft", type="primary")
-    topic = (st.session_state.get("topic") or "").strip()
-    if submitted and not topic:
-        st.warning("Type a topic or pick a demo example first.")
-    if submitted and topic:
-        import time as _t
-        limit = run_allowed()
-        lock = model_lock()
-        if working:
-            st.warning("Your previous draft is still being created; it is shown below.")
-        elif limit:
-            st.warning(limit)
-        elif not lock.acquire(blocking=False):
-            st.warning("Another draft is being created right now (the model runs one job at a time). "
-                       "Please try again in a minute or two.")
-        else:
-            st.session_state.run_times.append(_t.time())
-            llm = model()
-
-            def run():
-                c = fresh_connection()
-                try:
-                    yield from pipeline.run(c, llm, topic, artifact, audience)
-                finally:
-                    c.close()
-
-            new = jobs.start(run, label=topic, on_finish=lock.release)
-            st.session_state.job_id = new.id
-            st.session_state.last_run = None
-            st.query_params["job"] = new.id
+def phase_building():
+    stepper(2)
+    job_id = st.session_state.get("job_id") or st.query_params.get("job")
+    job = jobs.get(job_id)
+    if job is None:
+        st.info("This build is no longer running here (the app restarted). Finished drafts are in **My drafts**.")
+        if st.button("Start a new request"):
+            reset_flow()
             st.rerun()
-    if working:
-        job_progress(job.id)
-    elif st.session_state.get("last_run"):
-        render_run(st.session_state.last_run)
+        return
+    st.session_state.job_id = job.id
+    if not job.done:
+        building_progress(job.id)
+        return
+    last = job.events[-1] if job.events else {"step": "job", "status": "error", "data": {"error": job.error}}
+    d = last["data"]
+    if last["step"] == "done" and d.get("draft_id"):
+        sx().update(phase="draft", draft_id=d["draft_id"])
+        st.query_params["draft"] = d["draft_id"]
+        st.query_params.pop("job", None)
+        st.rerun()
+    if last["status"] == "not_found":
+        st.warning(f"**Evidex can't make this one yet.** {d.get('reason', '')} It covers the diagnosis, "
+                   "classification, screening and prevention of diabetes. Close to what you asked, it can make:")
+        suggest_buttons(d.get("suggestions") or [], "build")
+    else:
+        st.error("The draft could not be finished: " + str(d.get("error") or "no statements were produced")
+                 + ". Please try again.")
+    if st.button("← Back to my request", type="primary"):
+        sx().update(phase="confirm")
+        st.query_params.pop("job", None)
+        st.rerun()
 
 
-# ---------- about / how to test ----------
+# ---------- phase 3: the draft ----------
+
+def _plain_issue(issue: str) -> str:
+    i = issue.lower()
+    if "number" in i or "spine says" in i:
+        return "A number does not match its source."
+    if "support judge" in i:
+        return "The source does not fully support this wording."
+    if "wording" in i:
+        return "The wording looks broken."
+    if "patient-directed" in i:
+        return "It reads like advice to a patient."
+    return issue
+
+
+def ref_numbers(claims: list[dict]) -> tuple[dict[str, int], list[dict]]:
+    refs: dict[str, dict] = {}
+    for c in claims:
+        if c["status"] == "rejected":
+            continue
+        for an in c["verdict"].get("anchors", []):
+            refs.setdefault(an["assertion_id"], {"n": len(refs) + 1, **an})
+    return {k: v["n"] for k, v in refs.items()}, sorted(refs.values(), key=lambda r: r["n"])
+
+
+def _ref_line(r: dict) -> str:
+    if r.get("kind") == "pubmed" and r.get("url"):
+        return f"[{r['n']}] {r['anchor'].replace(r['url'], '').strip()} [PubMed ↗]({r['url']})"
+    if r.get("kind") == "upload":
+        return f"[{r['n']}] {r['anchor']}"
+    return f"[{r['n']}] {r['statement']} — {r['anchor']}"
+
+
+def statement_row(c: dict, nums: dict[str, int], locked: bool, ctx: str):
+    v = c["verdict"]
+    tag = " " + "".join(f"<sup>[{nums[a['assertion_id']]}]</sup>" for a in v.get("anchors", [])
+                        if a["assertion_id"] in nums)
+    needs_fix = not v.get("ok") and c["status"] != "rejected"
+    left, right = st.columns([14, 1]) if not locked else (st.container(), None)
+    if needs_fix:
+        left.markdown(f"⚠️ {c['text']}{tag}", unsafe_allow_html=True)
+        left.caption("Needs a fix: " + " ".join(dict.fromkeys(_plain_issue(x) for x in v.get("issues", []))))
+    else:
+        left.markdown(f"• {c['text']}{tag}", unsafe_allow_html=True)
+    if locked:
+        return
+    with right.popover("✏️", help="Edit or remove this statement"):
+        with st.form(f"fix-{ctx}-{c['id']}", border=False):
+            new = st.text_area("Statement", c["text"], height=100, label_visibility="collapsed")
+            s1, s2 = st.columns(2)
+            save = s1.form_submit_button("Save and re-check", type="primary")
+            remove = s2.form_submit_button("Remove")
+        if save and new.strip() and new.strip() != c["text"]:
+            lock = model_lock()
+            if not lock.acquire(timeout=20):
+                st.session_state.flash_error = "Evidex is busy; try saving again in a minute."
+            else:
+                try:
+                    with st.spinner("Checking…"):
+                        _act(drafts.edit, conn(), model(), c["id"], _who() or "reviewer", new,
+                             ok_msg="Saved and re-checked")
+                finally:
+                    lock.release()
+            st.rerun()
+        if remove:
+            _act(drafts.decide, conn(), c["id"], _who() or "reviewer", "rejected", ok_msg="Removed")
+            st.rerun()
+
+
+def flowchart_preview(sections: list[dict]):
+    lines = ['digraph f {', 'rankdir=TB; bgcolor="transparent"; nodesep=0.3; ranksep=0.35;',
+             'node [shape=box style="rounded,filled" fillcolor="#ECF6F5" color="#0F766E" fontname="Helvetica" '
+             'fontsize=10 margin="0.15,0.08"];', 'edge [color="#0F766E" penwidth=1.6];']
+    import textwrap
+    for i, s in enumerate(sections):
+        body = [textwrap.fill(c["text"], 48) for c in s["claims"] if c["status"] != "rejected"]
+        label = f"{i + 1}. {s['heading']}\\n\\n" + "\\n".join("• " + b.replace("\n", "\\n  ") for b in body)
+        lines.append(f'n{i} [label={_q(label)}];')
+    for i in range(len(sections) - 1):
+        lines.append(f"n{i} -> n{i + 1};")
+    lines.append("}")
+    st.graphviz_chart("\n".join(lines), use_container_width=False)
+    st.caption("Edit or remove any statement in the steps below; the flowchart follows.")
+
+
+def draft_view(draft_id: str, ctx: str):
+    d = drafts.load(conn(), draft_id)
+    if d is None:
+        st.info("Draft not found.")
+        return
+    u = d.get("understanding") or {}
+    locked = d["status"] == "signed_off"
+    art = d["artifact"]
+    nums, refs = ref_numbers(d["claims"])
+    st.markdown(f"## {d['title']}")
+    st.caption(f"{FORMAT_LABELS.get(art, art)} · for {d['audience']}"
+               + (" · ✅ approved by " + d["signed_by"] if locked else ""))
+    if u.get("research_note"):
+        st.info(u["research_note"])
+
+    if art == "flowchart":
+        flowchart_preview(d["sections"])
+    for i, s in enumerate(d["sections"], 1):
+        live = [c for c in s["claims"] if c["status"] != "rejected"]
+        with st.container(border=True):
+            prefix = {"slides": f"Slide {i} · ", "flowchart": f"Step {i} · "}.get(art, "")
+            st.markdown(f"**{prefix}{s['heading']}**")
+            if not live:
+                st.caption("Not provided (all statements removed).")
+            for c in live:
+                statement_row(c, nums, locked, ctx)
+    if d["audience"] == steps.PATIENT_PERSONA:
+        st.caption(steps.PATIENT_NOTE)
+    if refs:
+        with st.expander(f"References ({len(refs)})", expanded=locked):
+            for r in refs:
+                st.markdown(_ref_line(r))
+
+    st.divider()
+    if locked:
+        st.markdown("### ⬇ Download")
+        cols = st.columns(len(export.DOWNLOADS.get(art, ["pptx", "docx"])))
+        for n, (col, fmt) in enumerate(zip(cols, export.DOWNLOADS.get(art, ["pptx", "docx"]))):
+            try:
+                out = export.render(conn(), d["id"], fmt)
+            except export.ExportError as e:
+                col.error(str(e).replace("export blocked: ", ""))
+                continue
+            col.download_button(export.LABELS[fmt], out["data"], file_name=out["filename"], mime=out["mime"],
+                                key=f"dl-{ctx}-{fmt}", type="primary" if n == 0 else "secondary",
+                                on_click=export.log_export,
+                                args=(conn(), d["id"], fmt, _who() or d["signed_by"], out["sha256"], out["claims"]))
+        if ctx == "flow" and st.button("✨ Make something else"):
+            reset_flow()
+            st.rerun()
+    else:
+        state = drafts.signoff_state(d)
+        open_fixes = [c for c in d["claims"] if c["status"] != "rejected" and not c["verdict"].get("ok")]
+        with st.container(border=True):
+            st.markdown("### Approve and download")
+            name = st.text_input("Your name", value=_who(), key=f"name-{ctx}-{d['id']}",
+                                 placeholder="Dr …", help="Recorded with the approval.")
+            sure = st.checkbox("I have read this draft and checked its numbers against the references",
+                               key=f"sure-{ctx}-{d['id']}")
+            if open_fixes:
+                st.warning(f"{len(open_fixes)} statement(s) need a fix: edit them or remove them first.")
+            go = st.button("✅ Approve and get my file", type="primary",
+                           disabled=bool(open_fixes) or not sure or not name.strip(), key=f"approve-{ctx}-{d['id']}")
+            if go:
+                st.session_state.approver = name.strip()
+                ok = True
+                for c in d["claims"]:
+                    if c["status"] == "pending" and c["verdict"].get("ok"):
+                        if _act(drafts.decide, conn(), c["id"], name.strip(), "approved", numbers_checked=True) is None:
+                            ok = False
+                            break
+                if ok and _act(drafts.sign_off, conn(), d["id"], name.strip(),
+                               ok_msg="Approved. Your files are ready.") is not None:
+                    st.balloons()
+                st.rerun()
+            if state["unchecked_rows"]:
+                st.caption("Some guideline entries are still being checked by our doctor against the 2026 text; "
+                           "the file's references say which.")
+    with st.expander("Detailed review: statement by statement, with sources and checks"):
+        review_draft(d["id"], f"detail-{ctx}")
+
+
+def phase_draft():
+    stepper(3)
+    draft_id = sx().get("draft_id") or st.query_params.get("draft")
+    if not draft_id:
+        reset_flow()
+        st.rerun()
+    draft_view(draft_id, "flow")
+
+
+def create_page():
+    s = sx()
+    if s["phase"] == "request":
+        if st.query_params.get("job"):
+            s["phase"] = "building"
+        elif st.query_params.get("draft"):
+            s.update(phase="draft", draft_id=st.query_params["draft"])
+    {"request": phase_request, "confirm": phase_confirm, "building": phase_building,
+     "draft": phase_draft}[s["phase"]]()
+
+
+def drafts_page():
+    rows = drafts.list_drafts(conn())
+    if not rows:
+        st.info("No drafts yet. Make one in **Create**.")
+        return
+    labels = {r["id"]: f"{r['title']} · {r['created_at'].astimezone():%d %b %H:%M} · "
+                       + ("✅ approved" if r["status"] == "signed_off" else "in review")
+              for r in rows}
+    ids = list(labels)
+    pick = st.selectbox("Draft", ids, format_func=labels.get)
+    draft_view(pick, "mine")
+
+
+# ---------- how it works ----------
 
 def about_page():
     st.markdown("""
-### Evidex: verified teaching material from a doctor-curated diabetes knowledge base
+### Evidex: verified diabetes teaching material in minutes
 
-Doctors spend their time **assembling and checking** evidence, not typing. Evidex drafts teaching
-slides or handouts from a **knowledge spine** anchored to the *ADA Standards of Care in Diabetes 2026*
-(Sections 2–3: diagnosis, classification, screening, prevention). Every claim cites spine rows,
-numbers are checked by code, and **nothing is exported until a doctor approves every claim and signs off**.
+**1 · Your request.** Say what you need in a sentence, attach papers (PDF) or a deck (PPTX) if you
+have them, and pick who it is for and the format. Evidex tells you what it understood; you confirm.
 
-**Context → Evidence → Artifact → Verify → Approve**
+**2 · Building.** Evidex grounds the content in a doctor-curated knowledge base built from the
+*ADA Standards of Care in Diabetes 2026* (diagnosis, classification, screening, prevention), adds
+context from recent PubMed research and your files, writes for your audience and checks every number
+against its source.
 
-#### Try it (about 10 minutes)
-1. **Enter your name** in the sidebar (on a phone, tap **›** at the top left to open it). Every review
-   action is logged with it.
-2. **A patient-specific question is declined.** In *Create*, pick the demo example
-   *"What metformin dose should I start for my 54-year-old patient…"* and click **Create draft**
-   (~5 s). Evidex declines and offers a general question instead.
-3. **"Not found in sources".** Click the suggested general question, or pick *"Insulin pump settings…"*.
-   The spine has no dosing, treatment or device statements, so Evidex says so instead of guessing.
-4. **Create a draft.** Pick *"Diagnostic criteria for prediabetes"* (~1 min) or
-   *"Diagnosing diabetes in Indian adults"* (~3 min). Watch each step: Scope Guard, spine lookup,
-   Planner, Synthesizer, Verifier.
-5. **Review.** For each claim, open **Source** to see the spine row and its ADA anchor.
-   Switch on **Edit** for a claim, **change a number** (e.g. 5.7 to 6.0) and click *Save edit and re-verify*: the Verifier flags it
-   ("spine says 5.7–6.4 %") and approval is blocked. Reject it or change it back.
-6. **Sign off and export.** Approve the remaining claims (one by one with *Numbers checked*, or with
-   **Approve all** after confirming you checked them), click **Sign off**,
-   then download the **PPTX** or **DOCX**. The file contains exactly the approved text, numbered
-   references and an AI-use note.
-7. Optional: browse the spine in **Encyclopedia** and **Graph**; open *"What each agent saw and returned"*
-   under a run to see every prompt and output.
+**3 · Your draft.** Read the preview, fix or remove any statement, approve, and download:
+slides, a handout, a flowchart or a one-page summary, with numbered references.
+
+#### Try it (about 5 minutes)
+1. In **Create**, pick an example such as *"Flowchart for screening type 2 diabetes in adults"*, choose
+   who it is for, and press **Continue**.
+2. Check what Evidex understood, edit a question if you like, and press **Build it** (2–5 minutes).
+3. Read the draft. Open **✏️ Edit** on a statement and change a number (e.g. 6.5 to 7.0):
+   it is flagged and approval is blocked until you fix or remove it.
+4. Tick the confirmation, **Approve**, and download the file.
+5. Try a request about a specific patient (*"What dose should I start for my 54-year-old patient?"*):
+   Evidex declines and suggests a general question.
 
 #### Good to know
-- @@MODEL@@ It handles **one draft at a time**; if someone else is running one, you will be asked to
-  wait a minute.
-- Evidex reports what the guideline says; it **does not** give advice about individual patients.
-- Spine values were entered from long-standing ADA criteria; rows marked *"not yet checked"* are still
-  being verified by the doctor against the 2026 text, and missing recommendation numbers or pages show as
-  *TODO(doctor)*. Nothing is filled in by AI.
-- Synthetic content only. Drafts you create are visible in the *Drafts* tab to other evaluators.
+- @@MODEL@@
+- General teaching material only: Evidex never advises on an individual patient. Attach papers or
+  teaching material, never patient records (a check blocks files that look like one).
+- Every PubMed reference comes from PubMed itself; every number is checked by code against its source.
+- **Library** holds the knowledge base (encyclopedia, graph, and the doctor's verification progress).
 """.replace("@@MODEL@@", MODEL_ABOUT))
     st.caption("Team Synexis · AZYZ69 · source code: github.com/vigneshm2311-cyber/evidex")
 
@@ -840,15 +1102,14 @@ concepts, assertions = load()
 
 with st.sidebar:
     st.markdown("### Evidex")
-    st.caption("Diabetes knowledge spine · ADA Standards of Care in Diabetes 2026, Sections 2–3")
-    st.text_input("Your name (for the change log)", key="reviewer", placeholder="Dr …")
-    st.caption("Signed in as **doctor** (can edit the spine)" if is_doctor()
-               else "Signed in as **evaluator** (spine is read-only)")
-    st.divider()
-    st.caption(f"{len(concepts)} concepts · {len(assertions)} statements")
-    st.caption("The spine reports what the guideline says and where. It does not give advice "
-               "about any individual patient.")
-    if is_doctor() and st.button("Reload from database"):
+    st.caption("Diabetes teaching material, grounded in the ADA Standards of Care 2026 and recent research")
+    st.text_input("Your name", key="reviewer", placeholder="Dr …", help="Recorded with your approvals and edits.")
+    st.caption("Signed in as **doctor** (can edit the knowledge base)" if is_doctor()
+               else "Signed in as **evaluator**")
+    if st.button("✨ New request", use_container_width=True):
+        reset_flow()
+        st.rerun()
+    if is_doctor() and st.button("Reload knowledge base"):
         load.clear()
         export_files.clear()
         st.rerun()
@@ -859,17 +1120,18 @@ if err := st.session_state.pop("flash_error", None):
     st.toast(err, icon="⛔")
     st.error(err)
 
-tabi, tab0, tabd, tab1, tab2, tab3 = st.tabs(["ℹ️ How to test", "✍️ Create", "📝 Drafts", "📚 Encyclopedia",
-                                              "🕸️ Graph", "✅ Spine review" if is_doctor() else "✅ Verification"])
-with tabi:
-    about_page()
-with tab0:
-    create(concepts, assertions)
-with tabd:
+tab_create, tab_mine, tab_lib, tab_about = st.tabs(["✨ Create", "📂 My drafts", "📚 Library", "ℹ️ How it works"])
+with tab_create:
+    create_page()
+with tab_mine:
     drafts_page()
-with tab1:
-    encyclopedia(concepts, assertions)
-with tab2:
-    graph(concepts, assertions)
-with tab3:
-    review(concepts, assertions)
+with tab_lib:
+    l1, l2, l3 = st.tabs(["Encyclopedia", "Graph", "Spine review" if is_doctor() else "Verification"])
+    with l1:
+        encyclopedia(concepts, assertions)
+    with l2:
+        graph(concepts, assertions)
+    with l3:
+        review(concepts, assertions)
+with tab_about:
+    about_page()
