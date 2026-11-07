@@ -91,7 +91,9 @@ def red_flags(text: str) -> list[str]:
 
 def _general_query_problems(general: str, request: str) -> list[str]:
     problems = [f"general_query still {why}" for why in red_flags(general)]
-    leaked = numbers_in(general) & numbers_in(request)
+    # "type 1/2 diabetes", "stage 3" and the like are names, not a patient's numbers
+    names = re.compile(r"\b(type|stage|section|grade|step|class)\s*\d+\b", re.I)
+    leaked = numbers_in(names.sub(" ", general)) & numbers_in(names.sub(" ", request))
     if leaked:
         problems.append("general_query repeats the patient's numbers: "
                         + ", ".join(format(n, "f") for n in sorted(leaked)))

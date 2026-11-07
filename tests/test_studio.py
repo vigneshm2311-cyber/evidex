@@ -172,3 +172,17 @@ def test_support_judge_lists_each_source_once():
     verifier.judge_support(spy, [("a", [src]), ("b", [src]), ("c", [src])], run_id="t")
     assert spy.user.count("Among 1,234 adults") == 1
     assert "Claim 3 (its sources: pmid:1): c" in spy.user
+
+
+def test_type_2_is_not_a_patient_number():
+    assert steps._general_query_problems("Screening for type 2 diabetes in adults",
+                                         "Flowchart for screening type 2 diabetes in adults") == []
+    assert steps._general_query_problems("What does an HbA1c of 7.2 mean?",
+                                         "My patient's HbA1c is 7.2") != []
+
+
+def test_guideline_words_are_not_topics():
+    from evidex import pipeline
+    words = [w for w in "type 2 diabetes screening guidelines recommendations latest evidence".split()
+             if len(w) > 2 and w not in pipeline.GENERIC_WORDS]
+    assert words == []

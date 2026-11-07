@@ -54,6 +54,7 @@ prevention preventing prevent risk risks factors factor classification classify 
 definition define defined causes features signs symptoms evaluation assessment approach role use using
 flowchart flowcharts flow chart charts algorithm algorithms diagram diagrams pathway pathways table tables
 infographic poster quiz mcq mcqs presentation ppt pptx docx outline step steps stepwise often frequently
+guideline guidelines recommendation recommendations recommended recommend ada standards standard evidence clinical practice update updates latest current recent review reviews summary summaries reference quick adults adult people persons individuals population populations
 """.split())
 
 

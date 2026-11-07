@@ -609,8 +609,9 @@ def review_draft(draft_id: str, ctx: str):
         st.rerun()
 
 
-@st.cache_resource
 def model():
+    """A fresh client each time (cheap). Not cached: a cached client would keep running old code
+    after an update. Which models have hit their daily cap is shared at class level."""
     from evidex.llm import make_llm
     return make_llm()
 
@@ -676,6 +677,8 @@ def _use_example():
 
 def phase_request():
     stepper(1)
+    for k, v in (sx().pop("restore", None) or {}).items():  # back from the reading screen
+        st.session_state[k] = v
     if "prefill" in sx():
         st.session_state.req_text = sx().pop("prefill")
     st.markdown("### What would you like to make?")
@@ -713,20 +716,78 @@ def phase_request():
     if limit:
         sx()["notice"] = ("warning", limit)
         st.rerun()
-    lock = model_lock()
-    if not lock.acquire(timeout=30):
-        sx()["notice"] = ("warning", "Evidex is busy with another request. Please try again in a minute.")
+    sx().update(phase="reading", notice=None, suggestions=[],
+                pending={"request": request, "persona": persona, "artifact": artifact, "texts": texts})
+    st.rerun()
+
+
+@st.fragment(run_every=1)
+def reading_progress(job_id: str, has_request: bool, has_files: bool):
+    job = jobs.get(job_id)
+    if job is None:
+        return
+    if job.done and not st.session_state.get(f"seen-{job_id}"):
+        st.session_state[f"seen-{job_id}"] = True
+        st.rerun()  # whole page: show the result
+    steps_seen = list(sx().get("read_progress") or [])
+    expected = (3 if has_request else 2)
+    frac = 1.0 if job.done else min(0.1 + 0.8 * len(steps_seen) / expected, 0.95)
+    st.progress(frac, text=(steps_seen[-1] + "…") if steps_seen and not job.done else
+                ("Done" if job.done else "Starting…"))
+    lines = ["✅ Read your file(s)"] if has_files else []
+    for i, t in enumerate(steps_seen):
+        last = i == len(steps_seen) - 1 and not job.done
+        lines.append(f"{'🔄' if last else '✅'} {t}{'…' if last else ''}")
+    st.markdown("\n\n".join(lines) or "🔄 Starting…")
+    st.caption(f"{job.elapsed:.0f} s · usually 5–30 seconds; longer if the AI service is busy.")
+
+
+def phase_reading():
+    """Between Continue and 'Here's what I understood'. The model call runs in the background so this
+    screen replaces the form at once and shows live progress."""
+    stepper(1)
+    p = sx().get("pending")
+    if not p:
+        sx()["phase"] = "request"
         st.rerun()
-    try:
-        with st.status("Understanding your request…", expanded=True) as box:
-            if texts:
-                st.write(f"✅ Read {len(texts)} file(s): " + ", ".join(f["name"] for f in texts))
-            res = studio.understand(conn(), model(), request, persona, artifact, texts,
-                                    on_step=lambda t: st.write(f"🔄 {t}…"))
-            box.update(label="Done" if res["status"] == "ok" else "Checked", state="complete", expanded=False)
-    finally:
-        lock.release()
-    st.session_state.run_times.append(__import__("time").time())
+    request, persona, artifact, texts = p["request"], p["persona"], p["artifact"], p["texts"]
+    job = jobs.get(sx().get("read_job"))
+    if job is None:  # start it
+        lock = model_lock()
+        if not lock.acquire(blocking=False):
+            sx().update(phase="request", pending=None,
+                        notice=("warning", "Evidex is busy with another request. Please try again in a minute."),
+                        restore={"req_text": request, "req_persona": persona, "req_format": artifact})
+            st.rerun()
+        progress: list[str] = []
+        llm = model()
+
+        def run():
+            c = fresh_connection()
+            try:
+                res = studio.understand(c, llm, request, persona, artifact, texts, on_step=progress.append)
+            finally:
+                c.close()
+            yield {"run_id": res.get("run_id", ""), "step": "understood", "status": res["status"], "data": res, "ms": 0}
+
+        job = jobs.start(run, label="understand", on_finish=lock.release)
+        sx().update(read_job=job.id, read_progress=progress)
+    with st.container(border=True):
+        st.markdown("#### 🔎 Reading your request")
+        st.markdown(f"> {request or '(from your files)'}")
+        st.caption(f"For **{persona}** · {FORMAT_LABELS.get(artifact, artifact)}"
+                   + (f" · 📎 {', '.join(f['name'] for f in texts)}" if texts else ""))
+        reading_progress(job.id, bool(request), bool(texts))
+    if not job.done:
+        return
+    sx().update(read_job=None)
+    if job.error or not job.events:
+        res = {"status": "error", "message": f"Evidex could not read the request ({job.error}). Please try again."}
+    else:
+        res = job.events[-1]["data"]
+    st.session_state.setdefault("run_times", []).append(__import__("time").time())
+    sx().update(phase="request", pending=None,
+                restore={"req_text": request, "req_persona": persona, "req_format": artifact})
     status = res["status"]
     if status == "ok":
         sx().update(phase="confirm", understanding=res["understanding"], files=texts, notice=None, suggestions=[])
@@ -1093,7 +1154,7 @@ def create_page():
             s["phase"] = "building"
         elif st.query_params.get("draft"):
             s.update(phase="draft", draft_id=st.query_params["draft"])
-    {"request": phase_request, "confirm": phase_confirm, "building": phase_building,
+    {"request": phase_request, "reading": phase_reading, "confirm": phase_confirm, "building": phase_building,
      "draft": phase_draft}[s["phase"]]()
 
 
