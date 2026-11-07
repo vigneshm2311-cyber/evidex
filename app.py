@@ -26,7 +26,7 @@ except Exception:  # no secrets file when running locally
     pass
 
 HOSTED = os.environ.get("LLM_PROVIDER", "ollama").lower() == "groq"
-MODEL_SHORT = ("a hosted model; usually under a minute" if HOSTED
+MODEL_SHORT = ("a hosted model; usually 1–3 minutes" if HOSTED
                else "a local model on this Mac; usually 1–6 minutes")
 MODEL_ABOUT = ("Runs on a **hosted open model (Qwen3.8-27B on Groq)**: your request and the spine rows are sent to it, "
                "so enter general topics only, never patient details." if HOSTED else
@@ -763,8 +763,8 @@ def create(concepts, assertions):
         elif limit:
             st.warning(limit)
         elif not lock.acquire(blocking=False):
-            st.warning("Another draft is being created right now (the local model runs one job at a "
-                       "time). Please try again in a minute or two.")
+            st.warning("Another draft is being created right now (the model runs one job at a time). "
+                       "Please try again in a minute or two.")
         else:
             st.session_state.run_times.append(_t.time())
             llm = model()
