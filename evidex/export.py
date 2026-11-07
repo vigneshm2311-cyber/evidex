@@ -69,6 +69,33 @@ def build(conn, draft_id: str) -> dict:
             "other_texts": [c["text"] for c in d["claims"] if c["status"] != "approved"]}
 
 
+def build_unsaved(title: str, audience: str, sections: list[dict], signed: str,
+                  model: str = "a local language model") -> dict:
+    """Document model from in-memory claims marked approved (used by the evaluation only;
+    real exports always go through build() on a signed-off draft)."""
+    refs: dict[str, dict] = {}
+    out, approved, other = [], [], []
+    for s in sections:
+        items = []
+        for c in s["claims"]:
+            if not c.get("approved"):
+                other.append(c["text"])
+                continue
+            approved.append(c["text"])
+            nums = []
+            for an in c["verdict"].get("anchors", []):
+                refs.setdefault(an["assertion_id"], {"n": len(refs) + 1, **an})
+                nums.append(refs[an["assertion_id"]]["n"])
+            items.append({"claim_id": None, "text": c["text"], "refs": sorted(set(nums)),
+                          "assertion_ids": c["assertion_ids"], "grades": c["verdict"].get("grades", [])})
+        out.append({"heading": s["heading"], "items": items})
+    return {"draft_id": None, "title": title, "audience": audience, "artifact": "slides",
+            "request": "", "signed": signed, "sections": out,
+            "references": sorted(refs.values(), key=lambda r: r["n"]),
+            "ai_note": f"Evaluation export ({model}); not signed off.",
+            "approved_texts": approved, "other_texts": other}
+
+
 def ref_tag(refs: list[int]) -> str:
     return " [" + ", ".join(map(str, refs)) + "]" if refs else ""
 

@@ -261,7 +261,26 @@ def synthesizer(llm: LLM, heading: str, audience: str, assertions: list[dict],
     out = call_logged(llm, SYNTH_SYSTEM, user, SYNTH_SCHEMA,
                       step=f"synthesizer:{heading}" + (":retry" if feedback else ""),
                       run_id=run_id, validate=check, log_conn=log_conn)
+    names = {a.get(k) for a in assertions for k in ("subject_name", "object_name", "population_name")}
+    for c in out["claims"]:
+        c["text"] = tidy(c["text"], names - {None})
     return out["claims"]
+
+
+# Concept names that start with a proper noun keep their capital letter.
+PROPER_START = {"Asian", "American", "African", "Hispanic", "Latino", "Native", "Pacific", "Down", "Cushing",
+                "Wolfram", "Turner", "Klinefelter", "Prader", "Indian", "Black"}
+
+
+def tidy(text: str, names: set[str]) -> str:
+    """Typography only: '6.4 %' -> '6.4%', and a spine concept name copied mid-sentence
+    ('when Glycated haemoglobin') loses its capital. Words and numbers are otherwise unchanged."""
+    text = re.sub(r"(\d) %", r"\1%", text)
+    for n in sorted(names, key=len, reverse=True):
+        first = n.split()[0]
+        if len(first) > 1 and first[1:].islower() and first not in PROPER_START:
+            text = re.sub(r"(?<=[a-z0-9,;:)] )" + re.escape(n), n[0].lower() + n[1:], text)
+    return text
 
 
 # ---------------- code checks on claims ----------------

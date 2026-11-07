@@ -37,3 +37,6 @@
 | 2026-11-06 | Two codes: evaluator (create, review, sign off, export) and doctor (also edit the spine) | Evaluators can try every feature without changing the spine |
 | 2026-11-06 | One model job at a time (shared lock) and 10 drafts per hour per visitor | A local 8B model cannot serve parallel runs; protects the demo from overload |
 | 2026-11-06 | Access code kept out of the public repo; given only in the submission | The repository is public |
+| 2026-11-06 | Evaluation questions drafted by Claude, gold labels only from the doctor; unlabelled metrics reported as "not computed" | Brief: never generate gold answers or results |
+| 2026-11-06 | Number-error injection test (code alters one number per passing claim; measures code Verifier vs LLM judge) | Needs no clinical gold: the spine is the reference |
+| 2026-11-06 | Evaluation runs are not saved as drafts; their agent calls are logged with an `eval-` run prefix | Keeps the Drafts list clean, keeps the audit trail |
